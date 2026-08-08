@@ -10,6 +10,10 @@ oversell**; abandoned holds expire and are reclaimed; async payments confirm
 through the provided gateway under duplicate/race/failure/timeout modes with
 HMAC verification enforced. Verbatim outputs in [docs/test-evidence/](docs/test-evidence/).
 
+## Demo Video
+
+[Watch the full SeatLock demo on Vimeo](https://vimeo.com/1216635590)
+
 ## What was built
 
 - Browse **movies / theatres / showtimes**, live **seat map** (AVAILABLE /
