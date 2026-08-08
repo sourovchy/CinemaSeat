@@ -1,0 +1,102 @@
+# CI: runs on every pull request and every push to main.
+# Two jobs, both real: the test suite against a real PostgreSQL, and a
+# clean-clone docker compose boot that replays the official judging drills
+# (Scenario A burst, Scenario B expiry, gateway-down health).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Integration tests (real PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cinemaseat
+          POSTGRES_PASSWORD: cinemaseat
+          POSTGRES_DB: cinemaseat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cinemaseat -d cinemaseat"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+        env:
+          DATABASE_URL: postgres://cinemaseat:cinemaseat@localhost:5432/cinemaseat
+
+  frontend:
+    name: Frontend typecheck + tests + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  compose-e2e:
+    name: Clean-clone compose + scenario drills
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate compose file
+        run: docker compose config -q
+      - name: Boot the full stack from a clean clone (short TTL, HOOK 2/4)
+        run: HOLD_TTL_SECONDS=5 docker compose up -d --build
+      - name: Wait for app health
+        run: timeout 120 sh -c 'until curl -fsS http://localhost:3000/health > /dev/null 2>&1; do sleep 2; done'
+      - name: "HOOK 1: /health is 200 and fast"
+        run: |
+          time curl -fsS http://localhost:3000/health
+      - name: "Frontend: nginx serves SPA with fallback + same-origin /api"
+        run: |
+          timeout 60 sh -c 'until curl -fsS http://localhost:8080/ > /dev/null 2>&1; do sleep 2; done'
+          curl -fsS http://localhost:8080/ | grep -qi '<div id="root">'
+          curl -fsS http://localhost:8080/theatres | grep -qi '<div id="root">'
+          curl -fsS http://localhost:8080/api/movies > /dev/null
+          curl -fsS http://localhost:8080/health
+      - name: "Scenario A: 100 concurrent holds, same seat"
+        run: node scripts/scenario-a.mjs
+        env:
+          BASE_URL: http://localhost:3000
+      - name: "Scenario B: abandoned hold expires and is reclaimed"
+        run: node scripts/scenario-b.mjs
+        env:
+          BASE_URL: http://localhost:3000
+      - name: "HOOK 1: /health stays green with the gateway stopped"
+        run: |
+          docker compose stop gateway
+          time curl -fsS http://localhost:3000/health
+          curl -fsS http://localhost:3000/api/movies > /dev/null
+          curl -fsS http://localhost:3000/api/shows/1/seats > /dev/null
+      - name: Dump app logs
+        if: always()
+        run: docker compose logs app --tail 200
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

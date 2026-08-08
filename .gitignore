@@ -5,3 +5,6 @@ coverage/
 *.log
 .DS_Store
 k6-results/
+
+# Local Puku editor state
+.puku/
