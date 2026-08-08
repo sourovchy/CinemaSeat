@@ -6,9 +6,15 @@
     "node": ">=22"
   },
   "scripts": {
-    "migrate": "node src/platform/migrate.js"
+    "start": "node src/server.js",
+    "migrate": "node src/platform/migrate.js",
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
+    "scenario:a": "node scripts/scenario-a.mjs",
+    "scenario:b": "node scripts/scenario-b.mjs",
+    "smoke:payment": "node scripts/payment-smoke.mjs"
   },
   "dependencies": {
+    "fastify": "^5.11.2",
     "pg": "^8.13.1"
   }
 }
