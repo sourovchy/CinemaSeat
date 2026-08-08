@@ -1,0 +1,12 @@
+node_modules
+.git
+.github
+.claude
+docs
+test
+scripts
+k6-results
+.env
+*.md
+Dockerfile
+docker-compose.yml

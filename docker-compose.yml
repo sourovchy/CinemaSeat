@@ -1,4 +1,36 @@
 services:
+  app:
+    build: .
+    environment:
+      PORT: 3000
+      # HOOK 2: judges can start the stack with e.g. HOLD_TTL_SECONDS=5.
+      HOLD_TTL_SECONDS: ${HOLD_TTL_SECONDS:-120}
+      PAYMENT_PENDING_TIMEOUT_SECONDS: ${PAYMENT_PENDING_TIMEOUT_SECONDS:-600}
+      SWEEP_INTERVAL_SECONDS: ${SWEEP_INTERVAL_SECONDS:-5}
+      DATABASE_URL: postgres://${POSTGRES_USER:-cinemaseat}:${POSTGRES_PASSWORD:-cinemaseat}@db:5432/${POSTGRES_DB:-cinemaseat}
+      GATEWAY_URL: http://gateway:9000
+      # Must be reachable FROM INSIDE the gateway container → service DNS,
+      # never localhost. In deployment set this to the public URL.
+      PUBLIC_CALLBACK_URL: ${PUBLIC_CALLBACK_URL:-http://app:3000/api/payments/callback}
+      GATEWAY_SECRET: ${GATEWAY_SECRET:-z2p-2026-secret}
+      # "enforce" verified against the real gateway image: forged or
+      # tampered callbacks are rejected with 401.
+      GATEWAY_SIGNATURE_MODE: ${GATEWAY_SIGNATURE_MODE:-enforce}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      # Deliberately NO dependency on the gateway: the app must start and
+      # stay healthy even when the gateway is down.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
   db:
     image: postgres:16-alpine
     environment:
@@ -6,7 +38,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cinemaseat}
       POSTGRES_DB: ${POSTGRES_DB:-cinemaseat}
     ports:
-      - "5432:5432"
+      # Host port 5433 to dodge collisions with a locally installed Postgres;
+      # containers always talk to db:5432.
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - dbdata:/var/lib/postgresql/data
     healthcheck:
