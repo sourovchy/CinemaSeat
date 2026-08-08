@@ -57,9 +57,7 @@ HMAC verification enforced. Verbatim outputs in [docs/test-evidence/](docs/test-
 
 ## What does not work yet
 
-- **No deployment yet** — Poridhi VM deployment is the next milestone; there
-  is no public URL at this time.
-- **CD pipeline** not yet added (CI only until the deploy target exists).
+- **CD pipeline** not yet added (CI only).
 - No automated refund driver: a `SUCCEEDED` callback for a non-confirmable
   attempt is flagged `needs_refund` and logged, but `/refund` is not yet
   called automatically.
@@ -245,9 +243,9 @@ URLs, so no CORS configuration and no per-environment rebuild are needed.
 
 ## Deployed URL
 
-**Not deployed yet.** Poridhi VM deployment is the next milestone; the full
-step-by-step runbook is in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). This
-section will carry the public URL once it exists.
+**Live on Poridhi:**
+
+https://6a1de2095dde7994028d89e7_4fd4d7ff.lb.poridhi.io
 
 ## Repository documentation
 

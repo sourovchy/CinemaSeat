@@ -16,14 +16,16 @@ Target: a single Poridhi VM running Docker with Compose v2. The whole stack
 | Port | Service | Exposure |
 | --- | --- | --- |
 | `${WEB_PORT:-8080}` | `web` — nginx: UI + `/api` + `/health` + `/ready` | **public** — this is the deployed URL |
-| `${APP_PORT:-3000}` | `app` — backend API directly | optional public (judges can hit the API directly) |
+| `${APP_PORT:-3000}` (host 3001 → container 3000) | `app` — backend API directly | optional public (judges can hit the API directly) |
 | `9000` | provided gateway | keep private unless a drill needs it from outside |
 | `${POSTGRES_HOST_PORT:-5433}` | PostgreSQL | **never expose publicly** |
 
 Only the `web` port must be reachable through the Poridhi load balancer /
 public URL. Everything else communicates over the internal compose network
 (`web → app:3000`, `app → gateway:9000`, `app → db:5432`,
-`gateway → app:3000` for signed callbacks).
+`gateway → app:3000` for signed callbacks). Note: inside containers the backend
+always listens on container port 3000; the host port (e.g. `APP_PORT=3001`) only
+maps host port 3001 to container port 3000 to prevent host port collisions.
 
 ## Environment / secrets
 
