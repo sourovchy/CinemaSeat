@@ -1,0 +1,14 @@
+{
+  "name": "cinemaseat",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "migrate": "node src/platform/migrate.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cinemaseat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cinemaseat}
+      POSTGRES_DB: ${POSTGRES_DB:-cinemaseat}
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cinemaseat} -d ${POSTGRES_DB:-cinemaseat}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gateway:
+    # Provided mock payment/OTP gateway. Do NOT replace with a self-made mock.
+    image: asifmahmoud414/mock-gateway:latest
+    container_name: gateway
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+
+volumes:
+  dbdata:
