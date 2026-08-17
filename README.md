@@ -6,6 +6,12 @@
 
 CinemaSeat is a cinema booking platform built around one core invariant: a seat must never be confirmed for more than one user.
 
+<p align="center">
+  <img src="docs/assets/homepage.png" alt="CinemaSeat homepage" width="800" />
+</p>
+
+**Live Demo:** [https://cinemaseat.vercel.app](https://cinemaseat.vercel.app)
+
 ## Contents
 
 1. [Project Overview](#project-overview)
@@ -420,6 +426,7 @@ For detailed architecture, design decisions, deployment, requirements, and verif
 After submission, the project went through a focused round of testing and refinement.
 
 - Polished the **frontend experience** with UI, usability, and performance refinements.
+- Deployed the **live web application to Vercel** for public preview and interactive demo testing.
 - Improved **data correctness and consistency** across shows, seats, bookings, and dates.
 - Added **automatic rolling show schedules** so the application remains functional as real dates move forward.
 - Strengthened **booking and seat concurrency handling** under real-world concurrent load.
