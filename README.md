@@ -209,9 +209,6 @@ CinemaSeat/
 │   │   ├── CI_CHECKPOINT_2026-08-08.md
 │   │   ├── PRODUCTION_READINESS_AUDIT_2026-08-08.md
 │   │   └── REQ25_PAYMENT_RECOVERY_INVESTIGATION_2026-08-08.md
-│   ├── current/                         # Post-hackathon current-state documentation and evidence
-│   │   ├── audits/                      # Audits of current-state system characteristics (CURRENT_STATE_AUDIT.md)
-│   │   └── test-evidence/               # Active verification runs (CURRENT_RUNTIME_VERIFICATION.md)
 │   ├── reference/                       # Hackathon problem statement and gateway specifications
 │   │   ├── CinemaSeat_Gateway_Reference.docx
 │   │   └── CinemaSeat_Problem_Statement.docx
@@ -408,26 +405,15 @@ These outcomes were verified on the live composed stack:
      - `04:52:47.847Z`: User B successfully claims the seat on the next attempt (booking ref `bk_66dbc3a37109`).
    - **Verification Logs**: Detailed timeline logs are available in [`docs/test-evidence/scenario-b-2026-08-08.md`](docs/test-evidence/scenario-b-2026-08-08.md).
 
-
-
 ## Documentation
 
-For detailed architecture, design decisions, deployment, requirements, and project references, see:
+For detailed architecture, design decisions, deployment, requirements, and verification, see:
 
-### Living Documentation
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — Design patterns, state transitions, locking strategies.
-- [DECISIONS.md](DECISIONS.md) — Record of structural design choices and trade-offs.
-- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — Local setup, deployment, configuration, and operational checks.
-- [REQUIREMENTS.md](docs/REQUIREMENTS.md) — Full business and system requirement mappings.
-
-### Current-State Audits & Verification
-- [CURRENT_STATE_AUDIT.md](docs/current/audits/CURRENT_STATE_AUDIT.md) — Current post-hackathon architecture, rules, and known limitations.
-- [CURRENT_RUNTIME_VERIFICATION.md](docs/current/test-evidence/CURRENT_RUNTIME_VERIFICATION.md) — Current frontend and backend validation results.
-
-### Historical Hackathon Submissions (Frozen Snapshot)
-- [Problem Statement](docs/reference/CinemaSeat_Problem_Statement.docx)
-- [Gateway Technical Reference](docs/reference/CinemaSeat_Gateway_Reference.docx)
-- [README submitted during the hackathon](docs/README_SUBMITTED.md)
+- [Architecture](docs/ARCHITECTURE.md) — System architecture, state transitions, and concurrency strategy.
+- [Design Decisions](DECISIONS.md) — Structural decisions and trade-offs.
+- [Deployment](docs/DEPLOYMENT.md) — Local setup, configuration, and deployment.
+- [Requirements](docs/REQUIREMENTS.md) — Business and system requirements.
+- [Original Hackathon Submission](docs/README_SUBMITTED.md) — Frozen snapshot of the README submitted during the hackathon.
 
 ## Post-Hackathon Improvements
 
