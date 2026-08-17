@@ -1,4 +1,5 @@
 import { pool } from '../platform/db.js';
+import { ensureUpcomingShows } from './generator.js';
 
 export async function catalogRoutes(app) {
   app.get('/movies', async () => {
@@ -10,14 +11,19 @@ export async function catalogRoutes(app) {
 
   app.get('/theatres', async () => {
     const { rows } = await pool.query(
-      'SELECT id, name, city FROM theatres ORDER BY id'
+      `SELECT t.id, t.name, t.city, t.address, COUNT(sc.id) AS halls_count
+         FROM theatres t
+         LEFT JOIN screens sc ON sc.theatre_id = t.id
+        GROUP BY t.id, t.name, t.city, t.address
+        ORDER BY t.id`
     );
     return { theatres: rows };
   });
 
-  // All seeded shows are returned without a time filter: judging happens on
-  // the seed day itself, and hiding "past" shows would hide the demo data.
+  // Dynamically generate upcoming shows relative to Today on access,
+  // and filter out shows that started in the past (older than 2 hours).
   app.get('/shows', async () => {
+    await ensureUpcomingShows();
     const { rows } = await pool.query(
       `SELECT sh.id, sh.movie_id, m.title AS movie_title,
               t.id AS theatre_id, t.name AS theatre_name, t.city,
@@ -27,6 +33,7 @@ export async function catalogRoutes(app) {
          JOIN movies m   ON m.id = sh.movie_id
          JOIN screens sc ON sc.id = sh.screen_id
          JOIN theatres t ON t.id = sc.theatre_id
+        WHERE sh.starts_at >= now() - INTERVAL '2 hours'
         ORDER BY sh.starts_at, sh.id`
     );
     return { shows: rows };

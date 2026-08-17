@@ -7,10 +7,14 @@ interface BookingConfirmationProps {
   show: Show | null;
 }
 
+/**
+ * Legacy BookingConfirmation — kept for API compatibility.
+ * The ConfirmedPage now uses the ticket-style layout directly.
+ */
 export function BookingConfirmation({ booking, show }: BookingConfirmationProps) {
   return (
-    <section className="card booking-confirmation" aria-label="Booking confirmation">
-      <h2>Booking confirmed</h2>
+    <section className="booking-confirmation" aria-label="Booking confirmation">
+      <h2>Booking Confirmed</h2>
       <dl className="summary-meta">
         <div>
           <dt>Reference</dt>
@@ -47,11 +51,11 @@ export function BookingConfirmation({ booking, show }: BookingConfirmationProps)
           <dd>{formatCents(booking.amount_cents)}</dd>
         </div>
       </dl>
-      <p className="success-note">
+      <div className="success-note" style={{ marginTop: 'var(--space-4)' }}>
         Keep your reference — it identifies your booking.
-      </p>
+      </div>
       <Link to="/" className="btn btn-primary">
-        Back to movies
+        Back to Movies
       </Link>
     </section>
   );

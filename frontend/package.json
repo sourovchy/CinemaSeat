@@ -1,9 +1,9 @@
 {
-  "name": "seatlock-frontend",
+  "name": "cinemaseat-frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Frontend for CinemaSeat/SeatLock. Read-only against the existing Fastify backend.",
+  "description": "Frontend for CinemaSeat. Read-only against the existing Fastify backend.",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

@@ -13,8 +13,8 @@ export default defineConfig({
     host: '127.0.0.1',
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
-        changeOrigin: false,
+        target: process.env.VITE_API_TARGET || process.env.BACKEND_URL || 'http://127.0.0.1:3000',
+        changeOrigin: true,
       },
     },
   },

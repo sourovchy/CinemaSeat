@@ -3,7 +3,7 @@ import { useNavigate, useParams, Link } from 'react-router-dom';
 import { showsApi } from '../api/catalog';
 import { bookingsApi } from '../api/bookings';
 import { useAsync } from '../hooks/useAsync';
-import { LoadingState, ErrorState, EmptyState } from '../components/States';
+import { ErrorState, EmptyState } from '../components/States';
 import {
   SeatMap,
   SeatLegend,
@@ -11,7 +11,9 @@ import {
 } from '../components/SeatMap';
 import { BookingSummary } from '../components/BookingSummary';
 import { CustomerForm } from '../components/CustomerForm';
+import { SeatMapSkeleton } from '../components/ui/Skeleton';
 import { ApiError } from '../api/client';
+import { formatDateTime } from '../lib/format';
 import type { Show } from '../types/api';
 
 export function SeatMapPage() {
@@ -117,33 +119,64 @@ export function SeatMapPage() {
 
   if (Number.isNaN(id) || id < 1) {
     return (
-      <section className="page">
-        <header className="page-header">
-          <h1>Invalid show</h1>
-        </header>
-        <Link to="/" className="btn btn-secondary">
-          Back to movies
-        </Link>
-      </section>
+      <div className="page-container">
+        <EmptyState
+          title="Invalid show"
+          message="The show ID in the URL is not valid."
+        />
+        <div style={{ marginTop: 16 }}>
+          <Link to="/" className="btn btn-secondary">Back to Movies</Link>
+        </div>
+      </div>
     );
   }
 
   if (shows.loading || seatMapState.loading) {
-    return <LoadingState label="Loading seats…" />;
+    return (
+      <div className="page-container">
+        <div className="page-header">
+          <h1>Choose Your Seats</h1>
+        </div>
+        <div className="seat-layout">
+          <SeatMapSkeleton />
+          <div className="side-panel">
+            <div className="card" style={{ padding: 'var(--space-5)', minHeight: 200 }}>
+              <div className="skeleton skeleton-text-lg" style={{ width: '60%', marginBottom: 16 }} />
+              <div className="skeleton skeleton-text" style={{ width: '80%', marginBottom: 8 }} />
+              <div className="skeleton skeleton-text" style={{ width: '50%' }} />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
+
   if (shows.error) {
-    return <ErrorState message={shows.error.message} onRetry={shows.reload} />;
+    return (
+      <div className="page-container">
+        <ErrorState message={shows.error.message} onRetry={shows.reload} />
+      </div>
+    );
   }
   if (seatMapState.error) {
     return (
-      <ErrorState
-        message={seatMapState.error.message}
-        onRetry={refreshSeatMap}
-      />
+      <div className="page-container">
+        <ErrorState
+          message={seatMapState.error.message}
+          onRetry={refreshSeatMap}
+        />
+      </div>
     );
   }
   if (!seatMapState.data) {
-    return <EmptyState message="No seat map available." />;
+    return (
+      <div className="page-container">
+        <EmptyState
+          title="No seat map"
+          message="No seat map is available for this show."
+        />
+      </div>
+    );
   }
 
   const counts = {
@@ -154,13 +187,23 @@ export function SeatMapPage() {
   };
 
   return (
-    <section className="page page-seat-map">
-      <header className="page-header">
-        <h1>{show?.movie_title ?? 'Seat selection'}</h1>
-        <p className="meta">
-          {show ? `${show.theatre_name} · ${show.screen_name}` : ''}
-        </p>
-      </header>
+    <div className="page-container">
+      {/* Compact Contextual Booking Header */}
+      <div className="booking-context-header" style={{ marginBottom: 'var(--space-6)', borderBottom: '1px solid var(--color-border-subtle)', paddingBottom: 'var(--space-4)' }}>
+        <h1 style={{ fontSize: 'var(--text-3xl)', fontWeight: 800, fontFamily: 'var(--font-display)', color: 'var(--color-text)' }}>
+          {show?.movie_title}
+        </h1>
+        <div style={{ color: 'var(--color-text-secondary)', display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '4px', fontSize: 'var(--text-sm)', alignItems: 'center' }}>
+          <span>{show?.theatre_name}</span>
+          <span style={{ color: 'var(--color-text-dim)' }}>•</span>
+          <span>{show?.screen_name}</span>
+          <span style={{ color: 'var(--color-text-dim)' }}>•</span>
+          <span>{show ? formatDateTime(show.starts_at) : ''}</span>
+        </div>
+        <div style={{ fontSize: 'var(--text-md)', fontWeight: 700, marginTop: 'var(--space-4)', color: 'var(--color-accent)', textTransform: 'uppercase', letterSpacing: '1px' }}>
+          Choose Seats
+        </div>
+      </div>
 
       <SeatLegend counts={counts} />
 
@@ -170,6 +213,7 @@ export function SeatMapPage() {
           selectedIds={selectedIds}
           onToggle={toggle}
           disabled={submitting}
+          screenName={show?.screen_name}
         />
         <div className="side-panel">
           <BookingSummary
@@ -183,22 +227,22 @@ export function SeatMapPage() {
             disabled={selectedIds.size === 0}
           />
           {selectedIds.size === MAX_SELECTION ? (
-            <p className="hint">
+            <p className="hint" style={{ textAlign: 'center' }}>
               Maximum of {MAX_SELECTION} seats selected.
             </p>
           ) : null}
           {submitError && submitError.code !== 'SEAT_UNAVAILABLE' ? (
-            <p className="form-error" role="alert">
+            <div className="form-error" role="alert">
               {submitError.message}
-            </p>
+            </div>
           ) : null}
           {conflictNote ? (
-            <p className="form-error" role="alert">
+            <div className="form-error" role="alert">
               {conflictNote}
-            </p>
+            </div>
           ) : null}
         </div>
       </div>
-    </section>
+    </div>
   );
 }

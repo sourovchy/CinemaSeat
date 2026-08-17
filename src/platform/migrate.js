@@ -2,8 +2,9 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pool } from './db.js';
+import { ensureTemplateShows } from '../catalog/generator.js';
 
-const dbDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'db');
+const dbDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'database');
 
 // Applies pending migrations in filename order, then the idempotent seed.
 // Safe to run on every boot and from multiple replicas at once: an advisory
@@ -40,6 +41,8 @@ export async function migrateAndSeed() {
 
     await client.query(await readFile(path.join(dbDir, 'seed.sql'), 'utf8'));
     console.log('seed: applied (idempotent)');
+    await ensureTemplateShows(client);
+    console.log('template shows: generated/seeded (idempotent)');
   } finally {
     await client.query('SELECT pg_advisory_unlock(727001)').catch(() => {});
     client.release();

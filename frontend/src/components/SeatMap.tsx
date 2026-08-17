@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, Fragment } from 'react';
 import type { Seat, UiSeatStatus } from '../types/api';
 
 export const MAX_SELECTION = 10;
@@ -8,6 +8,7 @@ interface SeatMapProps {
   selectedIds: ReadonlySet<number>;
   onToggle: (seatId: number) => void;
   disabled?: boolean;
+  screenName?: string;
 }
 
 interface RowGroup {
@@ -80,7 +81,19 @@ function humanStatus(s: UiSeatStatus): string {
   }
 }
 
-export function SeatMap({ seats, selectedIds, onToggle, disabled }: SeatMapProps) {
+function shouldInsertSpacer(screenName: string, seatNumber: number): boolean {
+  const name = screenName.toLowerCase();
+  if (name.includes('hall 2')) {
+    return seatNumber === 3;
+  } else if (name.includes('hall 3')) {
+    return seatNumber === 3 || seatNumber === 6;
+  } else {
+    // Hall 1 / Standard
+    return seatNumber === 4;
+  }
+}
+
+export function SeatMap({ seats, selectedIds, onToggle, disabled, screenName }: SeatMapProps) {
   const rows = useMemo(() => groupByRow(seats), [seats]);
 
   if (seats.length === 0) {
@@ -91,8 +104,9 @@ export function SeatMap({ seats, selectedIds, onToggle, disabled }: SeatMapProps
     );
   }
 
+  const hallClass = screenName ? `seat-map-${screenName.toLowerCase().replace(/\s+/g, '-')}` : '';
   return (
-    <div className="seat-map">
+    <div className={`seat-map ${hallClass}`}>
       <div className="screen" aria-hidden="true">
         <span>SCREEN</span>
       </div>
@@ -103,15 +117,30 @@ export function SeatMap({ seats, selectedIds, onToggle, disabled }: SeatMapProps
               {row.rowLabel}
             </span>
             <div className="seats" role="presentation">
-              {row.seats.map((seat) => (
-                <SeatButton
-                  key={seat.seat_id}
-                  seat={seat}
-                  uiStatus={deriveUiStatus(seat, selectedIds)}
-                  onToggle={onToggle}
-                  disabled={Boolean(disabled)}
-                />
-              ))}
+              {row.seats.map((seat, seatIdx) => {
+                const button = (
+                  <SeatButton
+                    key={seat.seat_id}
+                    seat={seat}
+                    uiStatus={deriveUiStatus(seat, selectedIds)}
+                    onToggle={onToggle}
+                    disabled={Boolean(disabled)}
+                  />
+                );
+
+                const needsSpacer = shouldInsertSpacer(screenName || '', seat.seat_number);
+                const isLast = seatIdx === row.seats.length - 1;
+
+                if (needsSpacer && !isLast) {
+                  return (
+                    <Fragment key={seat.seat_id}>
+                      {button}
+                      <div className="seat-spacer" aria-hidden="true" />
+                    </Fragment>
+                  );
+                }
+                return button;
+              })}
             </div>
             <span className="row-label" aria-hidden="true">
               {row.rowLabel}

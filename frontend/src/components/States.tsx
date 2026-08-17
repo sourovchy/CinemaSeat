@@ -5,7 +5,7 @@ export function LoadingState({ label = 'Loading…' }: LoadingProps) {
   return (
     <div className="state state-loading" role="status" aria-live="polite">
       <div className="spinner" aria-hidden="true" />
-      <span>{label}</span>
+      <span style={{ color: 'var(--color-text-secondary)' }}>{label}</span>
     </div>
   );
 }
@@ -22,12 +22,15 @@ export function ErrorState({
 }: ErrorProps) {
   return (
     <div className="state state-error" role="alert">
+      <div className="state-icon">!</div>
       <strong>{title}</strong>
       <p>{message}</p>
       {onRetry ? (
-        <button type="button" className="btn btn-secondary" onClick={onRetry}>
-          Try again
-        </button>
+        <div className="state-action">
+          <button type="button" className="btn btn-secondary" onClick={onRetry}>
+            Try Again
+          </button>
+        </div>
       ) : null}
     </div>
   );
@@ -42,7 +45,8 @@ export function EmptyState({
   message,
 }: EmptyProps) {
   return (
-    <div className="state state-empty" role="status">
+    <div className="state" role="status">
+      <div className="state-icon" style={{ background: 'var(--color-surface)', color: 'var(--color-text-muted)' }}>—</div>
       <strong>{title}</strong>
       <p>{message}</p>
     </div>

@@ -1,108 +1,113 @@
-# Architectural Decisions
+# CinemaSeat — Architectural Decisions
 
-Three decisions that shaped this system, with what we gave up for each.
+This document records the significant architectural and engineering decisions that shape the CinemaSeat application.
 
-## 1. PostgreSQL row locks are the only concurrency mechanism
+**Hackathon submission:** The original decision record is preserved in [`docs/DECISIONS_SUBMITTED.md`](docs/DECISIONS_SUBMITTED.md).
 
-**Problem.** The core requirement: 100 concurrent requests for the same seat
-must produce exactly one hold, zero oversell — and stay correct with multiple
-app instances.
+---
 
-**Options considered.**
+## 1. PostgreSQL Row Locks as the Concurrency Mechanism
 
-1. Redis distributed locks (SETNX + TTL) in front of the database.
-2. In-process mutex / queue per seat in Node.
-3. PostgreSQL `SERIALIZABLE` isolation and retry loops on 40001 errors.
-4. One row per (show, seat) in `show_seats`, claimed with
-   `SELECT … ORDER BY seat_id FOR UPDATE` + a conditional `UPDATE`, plus lazy
-   expiry (`hold_expires_at <= now()` treated as available) inside the same
-   transaction.
+### Context
+Seat holds must be mutually exclusive. Under concurrent request bursts (such as 100 requests competing for a single seat), only one transaction may succeed, preventing double-booking across multiple application instances.
 
-**Chosen: option 4.**
+### Options Considered
+1. **Redis Distributed Locks**: Implementing distributed locks (`SETNX` with a TTL) in front of the database.
+2. **In-Process Locks/Mutexes**: Managing an in-memory queue or mutex per seat within the Node.js runtime.
+3. **PostgreSQL Serializable Isolation**: Using `SERIALIZABLE` transactions and executing client-side retry loops when serializability conflicts occur.
+4. **PostgreSQL Row-Level Locking**: Representing each seat as a row in the `show_seats` table and using `SELECT ... FOR UPDATE` combined with a conditional `UPDATE` within a single database transaction.
 
-**Why.** The seat's owner is a single database row, so PostgreSQL's row lock
-*is* the mutual exclusion — there is no second system whose state can drift
-from the source of truth. A Redis lock adds a component whose TTL/failover
-semantics can disagree with Postgres (that disagreement is exactly how
-double-bookings are born); an in-process mutex is wrong the moment a second
-replica exists; SERIALIZABLE punts the conflict to error-handling code paths
-that only fire under load — the hardest place to be wrong. Locking in
-ascending `seat_id` order makes overlapping multi-seat holds queue instead of
-deadlocking, and using the database clock for expiry means app clock skew is
-irrelevant. Verified: 100-burst → 1/99/0 (twice locally + in CI), overlapping
-multi-seat races, reclaim-without-sweeper.
+### Decision
+We chose PostgreSQL row-level locks on the `show_seats` table (Option 4). The data state and the lock are combined in the same database row.
 
-**Sacrificed.** Peak hold throughput per seat is bounded by serial row-lock
-processing (irrelevant: contention on one seat is precisely the case that
-must serialize), and PostgreSQL is a scaling bottleneck we accept for a
-weekend system. We also run a small sweeper for hygiene — pure lazy expiry
-would have been less code but would leave stale rows and misleading metrics.
+### Rationale
+Relying on database row-level locks couples the lock directly to the data. There is no separate service (such as Redis) whose TTL or failover state can drift from the database's actual state. In-process mutexes do not work across multiple application replicas. PostgreSQL serializable transactions handle conflicts by throwing serialization errors, which shifts the complexity to retry handlers that are hard to verify under load. The booking transaction acquires locks on `show_seats` in ascending order of `seat_id` to prevent deadlocks.
 
-## 2. Modular monolith, raw SQL, three containers
+### Trade-offs
+* **Throughput limits**: Throughput per seat is capped by database serial processing time. This lock contention is accepted because multiple bookings for the same seat must serialize anyway.
+* **Database load**: Row-level locking transfers transaction coordination to the database engine, making PostgreSQL the primary scaling bottleneck.
 
-**Problem.** Eight hours to ship browse → hold → pay → confirm with tests,
-CI, Docker and a deployment. Every hard requirement (atomic claim, expiry,
-callback idempotency, the charge/callback race) is a *transaction boundary*
-problem.
+---
 
-**Options considered.**
+## 2. Modular Monolith with Raw SQL and Four Containerized Services
 
-1. Microservices (catalog / booking / payment services + a queue).
-2. Monolith with an ORM (Prisma/Sequelize).
-3. Modular monolith: Fastify + raw `pg` SQL, folders as module boundaries
-   (`catalog`, `booking`, `payment`, `platform`), one PostgreSQL, the
-   provided gateway as the only external dependency.
+### Context
+The project required implementing the entire workflow (`browse → show → seat → hold → pay → confirm`) within a tight timeline. The primary challenge was ensuring transactional integrity across seat holds, payment attempts, and webhook callback processing.
 
-**Chosen: option 3.**
+### Options Considered
+1. **Microservices**: Standalone services communicating asynchronously via message queues.
+2. **Monolith with an ORM**: A monolithic codebase built using an abstraction layer like Prisma or Sequelize.
+3. **Modular Monolith**: A single Node.js/Fastify application structured into logical directories (`catalog`, `booking`, `payment`, `platform`) using raw database connections.
 
-**Why.** Correctness here lives in transaction boundaries; a monolith lets
-each critical operation be exactly one PostgreSQL transaction, and raw SQL
-keeps those boundaries visible in the code (the hold is one readable
-function). Splitting booking and payment into services would turn the
-charge/callback race into a distributed-systems problem needing sagas or
-outboxes — enormous cost, zero judged benefit. The app is stateless, so
-horizontal scaling is still just N replicas behind a load balancer.
+### Decision
+We chose a modular monolith with raw SQL using Fastify (Option 3). The application is deployed via Docker Compose with four services: `web` (Nginx), `app` (Fastify backend), `db` (PostgreSQL), and `gateway` (mock gateway).
 
-**Sacrificed.** No independent scaling/deployment of modules; no ORM
-conveniences (we hand-write mapping and migrations); module discipline is by
-convention, not process boundary.
+### Rationale
+Correctness relies on strict transaction boundaries. A monolith allows critical operations (like holding seats and updating payment state) to run inside single database transactions. This avoids the need for distributed transaction patterns, outboxes, or sagas. Using raw SQL makes locking scopes and transaction boundaries explicit in the code. The Nginx service was added to serve the React SPA, handle SPA routing, and proxy `/api/*` requests same-origin, removing CORS issues and keeping the frontend stateless.
 
-## 3. Payment attempts exist before the gateway hears about them
+### Trade-offs
+* **Coarse scaling**: All modules scale together as a single unit. We cannot scale or deploy the payment module independently of the catalog.
+* **No ORM abstractions**: Database mappings and migrations are written manually in raw SQL, requiring more boilerplate.
 
-**Problem.** The gateway is deliberately hostile: callbacks arrive 2–15 s
-late, may duplicate, may *arrive before `/charge` returns* (`X-Mock-Force:
-race`), `/charge` can 500 or hang, and non-2xx callback responses are
-retried up to 8 times.
+---
 
-**Options considered.**
+## 3. Payment Attempt Persistence Prior to Gateway Charge Request
 
-1. Call `/charge` first, create the payment record from its response, match
-   callbacks by the gateway's `payment_id`.
-2. Persist a payment-attempt row (unique `attempt_ref`, sent to the gateway
-   as `booking_ref`) and flip the booking to `PAYMENT_PENDING` in one
-   transaction **before** calling `/charge`; resolve callbacks by
-   `booking_ref`; process each callback in ONE transaction whose first step
-   is `INSERT INTO payment_events (event_id PRIMARY KEY) … ON CONFLICT DO
-   NOTHING`; send `Idempotency-Key: <attempt_ref>` on every charge and
-   re-drive the *same* attempt after a 500/timeout.
+### Context
+The mock payment gateway operates asynchronously. Webhook callbacks can arrive several seconds late, may duplicate, or may reach the backend webhook handler before the outbound `/charge` request returns (a callback-first race condition).
 
-**Chosen: option 2.**
+### Options Considered
+1. **Response-driven creation**: Invoke `/charge` first and insert the payment attempt record only after receiving the gateway's `payment_id`.
+2. **Attempt-first persistence**: Insert a pending record into `payments` and set the booking's `active_payment_id` before calling the gateway.
 
-**Why.** Option 1 is structurally broken against this gateway: in race mode
-the callback can arrive while `/charge` is still in flight, and there is no
-record to match — the exact failure the problem statement warns about. With
-attempt-first there is always a committed row to find. Three independent
-layers make duplicates harmless (event-id primary key, `status='PENDING'`
-guard, seat-transition guards), and because the event insert shares the
-transaction with the state change, a mid-processing crash rolls both back and
-the gateway's retry reprocesses cleanly — dedupe can never eat an unprocessed
-event. The idempotency key makes `/pay` retries charge-once by construction.
-Verified against the real gateway image: race, duplicate (2 deliveries → 1
-event row → 1 confirmation), fail, timeout+retry — all with raw-body HMAC
-verification enforced.
+### Decision
+We chose attempt-first persistence (Option 2). The payment attempt is committed to the database before the gateway is called.
 
-**Sacrificed.** A little bookkeeping complexity (per-attempt refs,
-`active_payment_id`, `needs_refund` flag) and rare orphan `PENDING` attempts
-if a client never retries — cleaned up by the safety-timeout path rather than
-instantly. Automated `/refund` driving is deferred; late success on a dead
-attempt is currently flagged and logged, not auto-refunded.
+### Rationale
+If a callback beats the `/charge` response, option 1 fails because the webhook handler finds no matching record in the database. Attempt-first persistence guarantees that a matching `payments` record is committed before the callback arrives. The webhook handler runs inside a database transaction that verifies idempotency using a primary key constraint on `payment_events.event_id`. Outbound charges include the `attempt_ref` as the `Idempotency-Key`, making retries safe.
+
+### Trade-offs
+* **Orphaned attempts**: Abandoned checkouts leave pending payment attempts in the database. The background sweeper cleans these up when the safety window expires.
+* **Metadata tracking**: Tracking attempts requires extra columns (`active_payment_id`, `attempt_ref`) and logic in the booking transition steps.
+
+---
+
+## 4. Backend-Driven Rolling Show Generation
+
+### Context
+The seed database contains baseline show templates mapped to static dates. To keep the application functional as real-world dates move past the baseline seeds, the system must shift showtimes forward dynamically.
+
+### Options Considered
+1. **Manual cron scripts**: Periodically run update scripts or database tasks.
+2. **Frontend date shifting**: Offset dates dynamically in the browser UI and encode/decode virtual show IDs.
+3. **Backend rolling generation**: Generate actual database records for a sliding calendar window on boot and during catalog queries.
+
+### Decision
+We chose backend rolling show generation (Option 3). The backend dynamically inserts shows into the database for a sliding window (Yesterday, Today, and the next 6 days) based on the current date.
+
+### Rationale
+Frontend date-shifting relies on virtual IDs, which complicates seat locking because the locked ID does not map directly to a database row. Backend rolling generation keeps show IDs genuine, keeping the API simple and the frontend stateless. To prevent concurrent app replicas from generating duplicate records, the generator acquires a PostgreSQL advisory lock (`727002`) during execution.
+
+### Trade-offs
+* **Dynamic writes**: Catalog read operations may trigger write queries if the generator detects that a new date window has opened.
+* **Database growth**: The `shows` and `show_seats` tables grow continuously over time, requiring cleanup routines in long-running installations.
+
+---
+
+## 5. Bangladesh Standard Time (BST, UTC+6) Timezone Anchoring
+
+### Context
+Docker containers and database hosts default to UTC. If show schedules and rolling date calculations depend on host-local system times, show boundaries can shift across calendar days depending on where the host environment is running.
+
+### Options Considered
+1. **System-wide UTC enforcement**: Force the server runtime, Postgres container, and host machine to run strictly in UTC.
+2. **Code-level timezone shifting**: Parse dates and calculate schedule offsets using Bangladesh Standard Time (BST, UTC+6) explicitly in the code.
+
+### Decision
+We chose explicit timezone shifting (Option 2). Dates are shifted to UTC+6 in the backend logic before processing calendar offsets.
+
+### Rationale
+Relying on system-level timezone configuration (Option 1) is fragile because container, VM, or local developer configurations can easily differ. Explicitly anchoring calendar calculations to the UTC+6 offset in code ensures that the sliding window ("Today", "Tomorrow") evaluates identically regardless of host timezone configurations.
+
+### Trade-offs
+* **Parsing complexity**: Code must parse date strings with explicit timezone offsets to prevent host timezone defaults from polluting the logic.

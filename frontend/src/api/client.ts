@@ -1,10 +1,8 @@
 import type { ApiErrorPayload, DomainErrorCode } from '../types/api';
 
-// The frontend MUST use relative URLs only. In dev the Vite proxy at
-// /api/* forwards to http://localhost:3000 (see vite.config.ts). In a
-// future production integration the same Fastify app would serve the
-// built bundle, making /api/* resolve against the same origin.
-const API_BASE = '/api';
+// The frontend uses relative '/api' by default (proxied by Vite in dev to
+// http://127.0.0.1:3000), or VITE_API_BASE_URL if explicitly specified.
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
 export class ApiError extends Error {
   readonly status: number;

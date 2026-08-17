@@ -1,147 +1,170 @@
 # CinemaSeat — Architecture
 
+**Hackathon submission:** The architecture document submitted during the hackathon is preserved in [`ARCHITECTURE_SUBMITTED.md`](ARCHITECTURE_SUBMITTED.md).
+
 ## Overview
 
-One modular monolith: **Node.js 22+ / Fastify / raw SQL (`pg`) / PostgreSQL 16**.
-Three containers: `app`, `db`, `gateway` (the provided
-`asifmahmoud414/mock-gateway:latest` — never a self-made mock).
+CinemaSeat is a movie ticket booking monolith built with Node.js 22/Fastify and PostgreSQL 16. The application runs inside a Docker Compose stack alongside the provided payment and OTP mock gateway image (`asifmahmoud414/mock-gateway:latest`). It guarantees that no seat is ever double-booked or oversold under high concurrency, and that abandoned holds are automatically released.
 
-```
-                 ┌─────────────────────────────┐
-  client ──────▶ │  app (Fastify monolith)     │ ──── /charge, /otp/* ───▶ ┌─────────┐
-                 │  catalog | booking | payment │                          │ gateway │
-                 │  platform (db, config,      │ ◀─── payment callbacks ── │  :9000  │
-                 │  health, sweeper)           │                          └─────────┘
-                 └──────────────┬──────────────┘
-                                │ transactions (the only lock)
-                         ┌──────▼──────┐
-                         │ PostgreSQL  │
-                         └─────────────┘
-```
+All core business constraints—atomic seat selection, hold durations, payment attempt tracking, and webhook callback processing—are designed around single-transaction boundaries in PostgreSQL. The backend is stateless, allowing multiple replicas to run behind a load balancer while correctness is maintained through row-level locks and unique constraints at the database tier.
 
-Internal modules (folders, not services): `catalog` (movies/theatres/shows/seat
-map), `booking` (hold, expiry sweeper), `payment` (charge client, callback
-processor, OTP proxy), `platform` (db pool, migrations, config, health).
+## System Architecture
 
-**Why a monolith:** every hard requirement — atomic seat claim, hold expiry,
-callback idempotency, the charge/callback race — is a *transaction-boundary*
-problem. A monolith lets each critical operation be exactly one PostgreSQL
-transaction. Raw SQL keeps those boundaries visible. Stateless app ⇒ N replicas
-behind a load balancer remain correct, because every invariant lives in
-Postgres row locks and unique constraints.
+The following diagram illustrates the relationship between the client, proxy layer, application backend, database, and mock gateway:
 
-**Failure boundaries:** the gateway is the only external dependency, isolated
-behind 3 s timeouts. Gateway death degrades only pay/OTP endpoints to clean
-503s; browse/seat-map/hold/`/health` never touch it.
-
-## Data model
-
-```
-movies      (id PK, title, duration_min, rating, description)
-theatres    (id PK, name, city)
-screens     (id PK, theatre_id FK, name, row_count, cols_per_row)
-seats       (id PK, screen_id FK, row_label, seat_number,
-             UNIQUE (screen_id, row_label, seat_number))
-shows       (id PK, movie_id FK, screen_id FK, starts_at, price_cents,
-             UNIQUE (screen_id, starts_at))
-
-show_seats  (show_id FK, seat_id FK,
-             status CHECK IN ('AVAILABLE','HELD','BOOKED'),
-             booking_id FK NULL,             -- current owner
-             hold_expires_at timestamptz,
-             PRIMARY KEY (show_id, seat_id)) -- ← THE lock row
-
-bookings    (id PK uuid, ref UNIQUE, show_id FK,
-             customer_name, customer_phone,
-             status CHECK IN ('HELD','PAYMENT_PENDING','CONFIRMED',
-                              'FAILED','EXPIRED','CANCELLED'),
-             amount_cents, otp_verified_at, hold_expires_at,
-             active_payment_id FK payments NULL,  -- the ONE attempt allowed
-             created_at)                          -- to confirm this booking
-
-payments    (id PK uuid, booking_id FK,
-             attempt_ref UNIQUE,              -- sent to gateway as booking_ref
-             gateway_payment_id UNIQUE NULL,  -- reconciled from /charge reply
-             status CHECK IN ('PENDING','SUCCEEDED','FAILED',
-                              'REFUNDED','SUPERSEDED'),
-             needs_refund bool DEFAULT false, -- late success on a dead attempt
-             amount_cents, created_at)
-             + partial unique: UNIQUE (booking_id) WHERE status='PENDING'
-
-payment_events (event_id PK,                  -- gateway evt_xxx: dedupe anchor
-                payment_id, booking_ref, status, payload jsonb, received_at)
+```text
+                     ┌────────────────────────────────┐
+                     │       Browser / Client         │
+                     └───────────────┬────────────────┘
+                                     │
+                                     │ HTTP Requests
+                                     ▼
+                     ┌────────────────────────────────┐
+                     │      web - nginx (:8080)       │
+                     │  - React SPA bundle + fallback │
+                     │  - /api/* proxied same-origin  │
+                     └───────────────┬────────────────┘
+                                     │
+                                     │ Proxied Request (:3000)
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     app - Node 22 / Fastify Monolith                        │
+│  - catalog | booking | payment                                              │
+│  - platform (db, config, migrate, health, sweeper)                          │
+└────────────────┬───────────────────────────────────────┬────────────────────┘
+                 │                                       │
+                 │ SQL Transactions                      │ Outbound HTTP
+                 │ (Row Locks on show_seats)             │ (/charge, /otp/*)
+                 ▼                                       ▼
+┌────────────────────────────────┐       ┌────────────────────────────────┐
+│         PostgreSQL 16          │       │   gateway (provided, :9000)    │
+│  - One row per (show, seat)    │       │  - OTP and payment operations  │
+│    = the lock                  │       │  - Sends signed webhooks       │
+└────────────────────────────────┘       └───────────────┬────────────────┘
+                                                         │
+                                                         │ Signed Callbacks
+                                                         ▼
+                                         ┌────────────────────────────────┐
+                                         │    POST /payments/callback     │
+                                         │ (Processed by payment module)  │
+                                         └────────────────────────────────┘
 ```
 
-All money in integer cents. All timestamps `timestamptz`. **All expiry
-comparisons use the database clock (`now()`)** — app clocks are never trusted.
+The communication flows are structured as follows:
+* **Client to Web**: The browser makes HTTP requests to Nginx on port `8080`, which serves the static React application.
+* **API Proxying**: Nginx proxies all `/api/*` endpoints to the monolithic backend service (port `3000`) over the Docker Compose internal network.
+* **Database Queries**: The backend application executes SQL transactions on PostgreSQL.
+* **Outbound Gateway Requests**: The backend communicates directly with the mock payment gateway on port `9000` to dispatch OTPs and process charges.
+* **Asynchronous Webhooks**: The gateway sends signed HTTP POST callback webhooks to `/api/payments/callback` to notify the application of transaction outcomes.
 
-## Concurrency strategy (the core of the system)
+## Components
 
-### Single invariant
+The system is composed of four containerized services:
+1. **web (Nginx)**: Serves the production React frontend SPA (built with React 18, TypeScript, and Vite) with SPA fallback and reverse-proxies `/api/*` requests to backend port `3000`. The frontend bundle contains no hardcoded backend hostnames, using only same-origin relative paths.
+2. **app (Fastify Monolith)**: The Node.js application hosting the catalog, booking, and payment business logic, along with platform routines like migrations and the background sweeper.
+3. **db (PostgreSQL 16)**: Holds the authoritative seat allocation, booking, and transaction state.
+4. **gateway (Mock Payment Gateway)**: The provided mock payment and OTP gateway container service running the `asifmahmoud414/mock-gateway:latest` image.
 
-> For a given (show, seat): **maximum one active owner, ever.**
+Inside the Fastify monolith, code is structured into the following logical modules:
+* `catalog`: Exposes endpoints to browse movies, theatres, showtimes, and retrieve live seat status maps.
+* `booking`: Implements the transactional logic for holding seats, creating bookings, and releasing expired reservations.
+* `payment`: Interacts with the gateway for charging accounts, sending and verifying OTP codes, and handling webhook callbacks.
+* `platform`: Houses database connection pooling, schema migration runners, configuration parsing, and system health checks.
 
-One row per (show, seat) in `show_seats` means "who owns this seat" is a single
-row, and PostgreSQL row-level locking serializes every writer of that row.
+### Relational Data Model
 
-### Hold transaction (transaction boundary, documented per review)
+The PostgreSQL schema is structured as follows:
 
+| Table Name | Description | Key Fields & Constraints |
+| :--- | :--- | :--- |
+| `movies` | Cinematic catalog details. | `id` (PK), `title`, `duration_min`, `rating`, `description` |
+| `theatres` | Cinema location directory. | `id` (PK), `name`, `city` |
+| `screens` | Auditorium rooms belonging to theatres. | `id` (PK), `theatre_id` (FK), `name`, `row_count`, `cols_per_row`, `UNIQUE (theatre_id, name)` |
+| `seats` | Specific physical seats inside screens. | `id` (PK), `screen_id` (FK), `row_label`, `seat_number`, `UNIQUE (screen_id, row_label, seat_number)` |
+| `shows` | Screen-allocated movie showtimes. | `id` (PK), `movie_id` (FK), `screen_id` (FK), `starts_at`, `price_cents`, `UNIQUE (screen_id, starts_at)` |
+| `show_seats` | Dynamic seat mapping and locks per show. | `(show_id, seat_id)` (PK), `status` (`AVAILABLE`, `HELD`, `BOOKED`), `booking_id` (FK), `hold_expires_at` |
+| `bookings` | Customer ticket reservation records. | `id` (PK UUID), `ref` (UNIQUE), `show_id` (FK), `customer_name`, `customer_phone`, `status` (`HELD`, `PAYMENT_PENDING`, `CONFIRMED`, `FAILED`, `EXPIRED`, `CANCELLED`), `amount_cents`, `otp_verified_at`, `hold_expires_at`, `active_payment_id` (FK), `created_at` |
+| `payments` | Individual transaction attempts per booking. | `id` (PK UUID), `booking_id` (FK), `attempt_ref` (UNIQUE), `gateway_payment_id` (UNIQUE), `status` (`PENDING`, `SUCCEEDED`, `FAILED`, `REFUNDED`, `SUPERSEDED`), `needs_refund` (BOOLEAN), `amount_cents`, `created_at` |
+| `payment_events` | Webhook callback event idempotency log. | `event_id` (PK), `payment_id`, `booking_ref`, `status`, `payload` (JSONB), `received_at` |
+
+## Booking and Payment Flow
+
+The application coordinates the lifecycle of ticket creation and payment confirmation through a multi-step workflow.
+
+### Workflow Sequence
+
+```text
+[Seat Hold] ──► [OTP Verification] ──► [Persist Payment] ──► [Gateway /charge]
+                                                                     │
+[State Update] ◄── [Callback Validation] ◄── [Async Callback] ◄── [202 PENDING]
 ```
-BEGIN;
-  INSERT INTO bookings (status='HELD', hold_expires_at = now()+TTL, ...);
 
-  -- Deterministic lock order: ALWAYS ascending seat_id. Overlapping
-  -- multi-seat holds therefore queue instead of deadlocking.
-  SELECT seat_id FROM show_seats
-   WHERE show_id=$1 AND seat_id = ANY($2)
-   ORDER BY seat_id
-   FOR UPDATE;
+1. **Seat Hold**: The customer selects seats on the frontend. The backend locks the requested seats in the database, establishes a booking, and marks the seats as `HELD`.
+2. **OTP Dispatch & Verification**: The backend triggers OTP dispatch through the gateway (`/otp/send`) and verifies the customer's input (`/otp/verify`). A verified OTP is stamped on the booking as `otp_verified_at` to gate payment.
+3. **Persist Payment Attempt**: Before invoking the gateway, the backend inserts a pending record into `payments` and sets the booking’s `active_payment_id`. Writing this record first guarantees the application can resolve webhook callbacks even if they arrive before the outbound `/charge` response returns.
+4. **Gateway Charge**: The backend issues a POST request to `/charge` on the gateway, passing a unique `attempt_ref` as the `booking_ref`. An `Idempotency-Key` is sent on every charge request (using the `attempt_ref`), ensuring that gateway retries can never result in a double charge.
+5. **Immediate Pending Response**: The gateway returns an immediate `202 PENDING` response. The backend forwards this status, prompting the frontend to poll `/api/bookings/:ref`.
+6. **Async Webhook Callback**: The gateway processes the transaction asynchronously and posts the final status to `/api/payments/callback`.
+7. **Webhook Validation & State Update**: The callback handler verifies the HMAC-SHA256 signature, deduplicates by `event_id`, and transitions both the payment attempt and the booking state inside a single database transaction.
 
-  UPDATE show_seats
-     SET status='HELD', booking_id=$b,
-         hold_expires_at = now() + ($HOLD_TTL_SECONDS * interval '1 second')
-   WHERE show_id=$1 AND seat_id = ANY($2)
-     AND (status='AVAILABLE'
-          OR (status='HELD' AND hold_expires_at <= now()));  -- lazy expiry
+### Detailed Sequence Diagram
 
-  -- rowcount = requested count → COMMIT (all-or-nothing)
-  -- rowcount short            → ROLLBACK, HTTP 409 listing the losers
-COMMIT / ROLLBACK;
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Client (Frontend)
+    participant API as Fastify Monolith (app)
+    participant DB as PostgreSQL (db)
+    participant GW as Mock Gateway (gateway)
+
+    User->>API: Select seats & Hold (POST /api/shows/:id/hold)
+    activate API
+    API->>DB: Lock rows (SELECT ... FOR UPDATE ordered by seat_id)
+    DB-->>API: Seat locks acquired (HELD status set with TTL)
+    API-->>User: 201 Created (booking_ref)
+    deactivate API
+
+    User->>API: Request OTP (POST /otp/send)
+    API->>GW: Dispatch OTP (POST /otp/send)
+    GW-->>API: 202 Accepted
+    API-->>User: 202 Accepted
+
+    User->>API: Verify OTP (POST /otp/verify)
+    API->>GW: Verify code (POST /otp/verify)
+    GW-->>API: 200 Verified
+    API-->>User: 200 OK
+
+    User->>API: Pay Booking (POST /pay)
+    activate API
+    API->>DB: Save Payment Attempt (status = PENDING)
+    API->>GW: Request Charge (POST /charge with callback_url)
+    GW-->>API: 202 PENDING
+    API-->>User: 202 PENDING (Start Polling)
+    deactivate API
+
+    par Polling Loop
+        loop Every ~2s
+            User->>API: Poll Booking (GET /api/bookings/:ref)
+            API->>DB: Read status
+            DB-->>API: Status (PENDING/CONFIRMED)
+            API-->>User: Status response
+        end
+    and Gateway Processing
+        Note over GW: Process Payment async
+        GW->>API: Signed Callback (POST /callback with HMAC x-signature)
+        activate API
+        API->>DB: Run transaction (Deduplicate event_id, update show_seats to BOOKED)
+        DB-->>API: Transaction committed
+        API-->>GW: 200 OK (Acknowledge)
+        deactivate API
+    end
 ```
 
-Under 100 concurrent requests for one seat: the `FOR UPDATE` on the single row
-serializes all contenders; the first transaction's UPDATE flips the status; the
-other 99 acquire the lock in turn, match zero rows, and get a clean 409.
-Correct across multiple app replicas and restarts — no state lives in the app.
+### State Machines
 
-**Locking rules (uniform, per review correction #2):**
-- Any transaction touching multiple `show_seats` rows locks them first with
-  `SELECT … ORDER BY seat_id FOR UPDATE` (holds, callback confirm/release).
-- The sweeper uses `FOR UPDATE SKIP LOCKED` — contended rows are simply picked
-  up on the next sweep; the sweeper never fights a live transaction.
-- No `SELECT`-then-`UPDATE` without locks, no app-level flags, no in-memory
-  locks anywhere.
+The booking, payment-attempt, and seat statuses transition through the following lifecycles:
 
-### Hold expiry — two cooperating layers
-
-1. **Lazy, transactional (correctness):** every claim treats
-   `HELD AND hold_expires_at <= now()` as available (clause above); the seat
-   map computes effective status the same way. Correct even if the sweeper
-   never runs.
-2. **Sweeper (hygiene):** every `SWEEP_INTERVAL_SECONDS` one conditional UPDATE
-   releases expired `HELD` seats and marks their `HELD` bookings `EXPIRED`.
-   Safe with concurrent replicas (same conditional-update property).
-
-Initiating payment extends `hold_expires_at` on the booking's seats to
-`now() + PAYMENT_PENDING_TIMEOUT_SECONDS`, so the lazy clause cannot give the
-seat away mid-payment. `HOLD_TTL_SECONDS` always comes from the environment.
-
-## State machines
-
-Booking and payment-attempt states are modeled **separately** (review
-correction #3):
-
-```
+```text
 Booking:  HELD ──pay──▶ PAYMENT_PENDING ──active cb SUCCEEDED──▶ CONFIRMED
             │                 ├──active cb FAILED──▶ FAILED   (seats released)
             │                 └──safety timeout────▶ FAILED   (seats released,
@@ -155,79 +178,95 @@ Payment attempt:  PENDING ──▶ SUCCEEDED ──▶ REFUNDED
 Seat:  AVAILABLE ⇄ HELD ──▶ BOOKED
 ```
 
-### Active-attempt invariant (review corrections #1 and #3)
+### Active-Attempt Invariant
 
-> **Only the payment attempt whose id equals `bookings.active_payment_id` may
-> transition a booking to CONFIRMED.**
+To resolve retry races and duplicate callbacks:
+* **Active Attempt FK**: Only the payment attempt matching the booking's `active_payment_id` is authorized to confirm a booking.
+* **Superseded Attempts**: If a payment attempt fails or times out, a retry creates a new `payments` record with a distinct `attempt_ref` (e.g. `bk_ref-a2`) and updates `bookings.active_payment_id`. The previous attempt is transitioned to `SUPERSEDED`.
+* **Refund Flagging**: If a late callback arrives reporting `SUCCEEDED` for a `SUPERSEDED` attempt, the booking is **not** confirmed. The payment record is updated to `needs_refund = true` and logged/flagged for manual reconciliation. No automated refund driver exists to call `/refund` automatically, though if a `REFUNDED` callback is eventually received, the attempt state will transition to `REFUNDED`.
 
-- Each attempt gets its own unique `attempt_ref` (e.g. `bk_7f3a2c-2`), sent to
-  the gateway as `booking_ref`, so callbacks can never cross wires between
-  attempts.
-- **Retry** (after a synchronous `/charge` 500/timeout), one transaction:
-  old attempt `PENDING → SUPERSEDED` → insert new `PENDING` attempt with a new
-  `attempt_ref` → repoint `bookings.active_payment_id`. The partial unique
-  index guarantees at most one `PENDING` attempt per booking at all times.
-- **Late `SUCCEEDED` callback for a superseded attempt:** return HTTP 200,
-  do **not** confirm the booking, set `needs_refund = true`, call gateway
-  `/refund`; the eventual `REFUNDED` callback moves the attempt
-  `SUPERSEDED → REFUNDED`. A refund that cannot be sent (gateway down) is
-  retried by the sweeper while `needs_refund` is true.
-- **Late `FAILED` callback for a superseded attempt:** record the event,
-  no state change, HTTP 200 (nothing was charged; nothing to refund).
+## Concurrency and Data Integrity
 
-## Payment flow (defeats `X-Mock-Force: race`)
+The primary safety requirement is that **no seat may be confirmed for more than one user**. This invariant is enforced purely through PostgreSQL row-level locks.
 
-The payment attempt exists in our database **before** the gateway hears about
-it, so a callback arriving before `/charge` returns can always find it by
-`booking_ref = attempt_ref`.
+### Seat Reservation Transaction
 
-```
-POST /api/bookings/:ref/pay
- 1. TX: booking is HELD + OTP-verified + unexpired
-        → booking PAYMENT_PENDING, seats' hold_expires_at extended,
-          INSERT payments (PENDING, fresh attempt_ref),
-          bookings.active_payment_id = new attempt.  COMMIT.
- 2. Call gateway POST /charge (3 s timeout, X-Mock-* headers forwarded,
-        booking_ref = attempt_ref, callback_url = PUBLIC_CALLBACK_URL).
- 3. 202 → UPDATE payments SET gateway_payment_id=$id
-          WHERE attempt_ref=$ref AND gateway_payment_id IS NULL   -- reconcile
- 4. 500/timeout → HTTP 503 "retry payment"; attempt stays PENDING and is
-        superseded if/when the client retries.
- 5. Return 202 immediately. The frontend polls GET /api/bookings/:ref —
-        never the gateway, never a blocked HTTP request.
-```
+When a user requests a hold, the backend locks the relevant rows in the `show_seats` table. The transaction logic is represented below:
 
-## Callback processing (idempotent, always HTTP 200)
+```sql
+BEGIN;
+  -- Insert the parent booking record with status 'HELD' and expiration timestamp
+  INSERT INTO bookings (ref, show_id, customer_name, customer_phone, status, amount_cents, hold_expires_at)
+  VALUES ($1, $2, $3, $4, 'HELD', $5, now() + $6 * interval '1 second')
+  RETURNING id;
 
-```
-POST /api/payments/callback
- 1. INSERT INTO payment_events ON CONFLICT (event_id) DO NOTHING.
-    Zero rows → duplicate → 200, stop.
- 2. Find payment by booking_ref (= attempt_ref). Works even if /charge has
-    not returned. Store payment_id if missing. Unknown ref → log, 200.
- 3. Guarded transition in ONE transaction:
-      UPDATE payments SET status=$new WHERE id=$id AND status='PENDING'
-    Zero rows and not the late-success-refund case → already terminal → 200.
- 4. Same TX, only when this attempt IS bookings.active_payment_id:
-      SUCCEEDED → booking CONFIRMED, seats HELD→BOOKED (locked in seat order)
-      FAILED    → booking FAILED,    seats HELD→AVAILABLE
-    REFUNDED  → payment → REFUNDED (from SUCCEEDED, or SUPERSEDED+needs_refund)
- 5. HTTP 200 — including duplicates, unknown refs, malformed payloads.
+  -- Lock the target seats in ascending order to prevent deadlocks
+  SELECT seat_id 
+    FROM show_seats
+   WHERE show_id = $2 AND seat_id = ANY($7::bigint[])
+   ORDER BY seat_id
+     FOR UPDATE;
+
+  -- Verify availability under the lock. If any seat is taken or actively held, ROLLBACK
+  -- An expired held seat is eligible for lazy reclamation
+
+  -- Claim the seats atomically by updating their status and booking reference
+  UPDATE show_seats
+     SET status = 'HELD', booking_id = $booking_id,
+         hold_expires_at = now() + $6 * interval '1 second'
+   WHERE show_id = $2 AND seat_id = ANY($7::bigint[])
+     AND (status = 'AVAILABLE' 
+          OR (status = 'HELD' AND hold_expires_at <= now()));
+
+  -- Commit the transaction if the update count matches requested seats, otherwise ROLLBACK
+COMMIT;
 ```
 
-Three independent layers make duplicates harmless: the `event_id` primary key,
-the `status='PENDING'` guard, and the seat-transition guard.
+### Locking Rules
 
-## Health
+* **Deterministic Ordering**: Multi-seat operations always request and lock rows sorted in ascending order of `seat_id`. This prevents deadlock conditions between concurrent transactions.
+* **Skip Locked**: The background cleanup sweeper acquires rows with `FOR UPDATE SKIP LOCKED`. Contended seats are ignored and cleaned up on subsequent runs, avoiding lock contention with client-facing threads.
+* **Database Time**: Expiration math evaluates against the database clock (`now()`), making the platform immune to server-tier clock drift.
+* **Timezone Standardization**: Show scheduling is anchored to Bangladesh Standard Time (BST, UTC+6). The generator shifts dates and times to UTC+6 before processing templates, protecting scheduling logic from shifts caused by host-system or Docker-container timezone variances (e.g. UTC default).
 
-- `GET /health` — static 200, no I/O, no gateway, no DB. Answers < 1 s even
-  with every other container stopped.
-- `GET /ready` — DB ping with tight timeout, for orchestration only.
+### Expiration Layers
 
-## OTP
+Seat holds expire automatically through two complementary mechanisms:
+1. **Lazy Reclaiming**: The seat map queries and hold claims evaluate `status = 'HELD' AND hold_expires_at <= now()` as equivalent to `AVAILABLE`. Expired seats are reclaimed transactionally on read or write without requiring active cron jobs.
+2. **Background Sweeper Daemon**: A platform loop runs every `SWEEP_INTERVAL_SECONDS` to actively update expired `HELD` seats back to `AVAILABLE` and update their associated bookings to `EXPIRED`.
 
-`/otp/send` and `/otp/verify` are thin proxies to the provided gateway
-(`ref` = booking ref). Successful verify stamps `otp_verified_at`, which
-`/pay` requires. Resend is allowed (≈10 % of OTPs are lost by design).
-Gateway down/slow → 503 on these two endpoints only; browsing, seat maps,
-holds and health are unaffected.
+When a payment is initiated, the hold is extended to `now() + PAYMENT_PENDING_TIMEOUT_SECONDS`, protecting the seats from reclamation during processing.
+
+### Signature Validation and Deduplication
+
+* **Webhook Signature**: Webhooks sent from the gateway are validated on the backend by calculating the HMAC-SHA256 signature of the raw request payload using `GATEWAY_SECRET`.
+* **Idempotency Engine**: Callback processing operates in single transactions. Webhook payloads are inserted into `payment_events`, where a primary key constraint on `event_id` prevents duplicate processing.
+
+## Deployment
+
+The application is deployed as a Docker Compose stack containing four services.
+
+### Ports and Connections
+
+* **Nginx (`web`)**: Listens on public host port `8080` (mapping to port `80` in the container). It acts as the ingress controller.
+* **Fastify Monolith (`app`)**: Runs on port `3000` inside the container network.
+* **PostgreSQL (`db`)**: Maps to host port `5433` (preventing conflicts with local engines) and listens on port `5432` internally.
+* **Gateway (`gateway`)**: Binds to host port `9000`.
+
+A named Docker volume `dbdata` is mounted at `/var/lib/postgresql/data` within the `db` service to ensure restart persistence.
+
+### Key Environment Variables
+
+* `HOLD_TTL_SECONDS`: The duration (seconds) that seats remain held before lazy or active reclamation (never hardcoded).
+* `PAYMENT_PENDING_TIMEOUT_SECONDS`: The safety window (seconds) that protects seat holds while payment is pending (default 600 s).
+* `SWEEP_INTERVAL_SECONDS`: The frequency at which the background sweeper daemon cleans up expired holds.
+* `PORT` / `APP_PORT`: The backend Fastify monolith internal/host listening port (default 3000).
+* `WEB_PORT`: The public frontend web server (nginx) port (default 8080).
+* `DATABASE_URL`: Connection string for PostgreSQL (`postgres://cinemaseat:cinemaseat@db:5432/cinemaseat`).
+* `PGPOOL_MAX`: Maximum size of the database connection pool.
+* `GATEWAY_URL`: Address of the mock payment gateway (`http://gateway:9000`).
+* `GATEWAY_TIMEOUT_MS`: The network timeout duration for gateway HTTP requests.
+* `PUBLIC_CALLBACK_URL`: Target webhook callback address registered with the gateway. This must resolve from the gateway container (`http://app:3000/api/payments/callback`).
+* `GATEWAY_SECRET`: The shared webhook authentication key (`z2p-2026-secret`).
+* `GATEWAY_SIGNATURE_MODE`: Mode for verifying webhook signatures (`off`, `log`, or `enforce`).
+* `OTP_REQUIRED`: Boolean flag stating whether phone OTP verification is required to checkout.

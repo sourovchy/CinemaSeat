@@ -54,8 +54,22 @@ test('Scenario B: an abandoned hold expires and another user reclaims the seat',
   const bookingA = await jfetch(baseUrl, `/api/bookings/${holdA.body.booking_ref}`);
   assert.equal(bookingA.body.status, 'EXPIRED');
 
+  const beforeRow = await pool.query(
+    'SELECT status, booking_id, hold_expires_at, (hold_expires_at <= now()) AS expired FROM show_seats WHERE show_id = $1 AND seat_id = $2',
+    [SHOW_ID, SEAT_ID]
+  );
+  console.log('BEFORE SWEEP ROW:', beforeRow.rows[0]);
+
   // The sweeper physically materializes the release.
   const swept = await sweepExpired();
+  console.log('SWEPT RESULT:', swept);
+
+  const afterRow = await pool.query(
+    'SELECT status, booking_id, hold_expires_at FROM show_seats WHERE show_id = $1 AND seat_id = $2',
+    [SHOW_ID, SEAT_ID]
+  );
+  console.log('AFTER SWEEP ROW:', afterRow.rows[0]);
+
   assert.ok(swept.seatsReleased >= 1, 'sweeper released the expired seat');
   const row = await pool.query(
     'SELECT status, booking_id, hold_expires_at FROM show_seats WHERE show_id = $1 AND seat_id = $2',

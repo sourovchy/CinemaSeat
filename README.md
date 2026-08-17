@@ -1,259 +1,441 @@
-# CinemaSeat (SeatLock)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)](#) [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?logo=typescript&logoColor=white)](#) [![Vite](https://img.shields.io/badge/Vite-5.4-646CFF?logo=vite&logoColor=white)](#) [![Node.js](https://img.shields.io/badge/Node.js-22-339933?logo=nodedotjs&logoColor=white)](#) [![Fastify](https://img.shields.io/badge/Fastify-5.11-000000?logo=fastify&logoColor=white)](#) [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](#) [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](#) [![Nginx](https://img.shields.io/badge/Nginx-1.27-009639?logo=nginx&logoColor=white)](#)
 
-A movie ticket booking system that **never double-books a seat** — built for
-the "CINEMASEAT — When Everyone Wants the Same Seat" hackathon (CUET,
-2026-08-08).
+# CinemaSeat
 
-**Proven on 2026-08-08 against the real composed stack:** 100 concurrent
-holds for the same exact seat → **1 success, 99 clean rejections, 0
-oversell**; abandoned holds expire and are reclaimed; async payments confirm
-through the provided gateway under duplicate/race/failure/timeout modes with
-HMAC verification enforced. Verbatim outputs in [docs/test-evidence/](docs/test-evidence/).
+> Concurrency-safe cinema ticket booking engineered around strict seat reservation invariants.
 
-## Demo Video
+CinemaSeat is a cinema booking platform built around one core invariant: a seat must never be confirmed for more than one user.
 
-[Watch the full SeatLock demo on Vimeo](https://vimeo.com/1216635590)
+## Contents
 
-## What was built
+1. [Project Overview](#project-overview)
+2. [Hackathon Context](#hackathon-context)
+3. [What Is Built](#what-is-built)
+4. [Key Engineering Features](#key-engineering-features)
+5. [Architecture](#architecture)
+6. [Booking Flow](#booking-flow)
+7. [Reliability & Concurrency](#reliability--concurrency)
+8. [Payment & OTP Gateway](#payment--otp-gateway)
+9. [Technology Stack](#technology-stack)
+10. [Repository Structure](#repository-structure)
+11. [Running Locally](#running-locally)
+12. [API / Verification Endpoints](#api--verification-endpoints)
+13. [Testing & Verification](#testing--verification)
+14. [Documentation](#documentation)
+15. [Post-Hackathon Improvements](#post-hackathon-improvements)
 
-- Browse **movies / theatres / showtimes**, live **seat map** (AVAILABLE /
-  HELD / BOOKED, expired holds show as AVAILABLE immediately).
-- **Atomic seat holds** (single or up to 10 seats, all-or-nothing) with a TTL
-  driven entirely by the `HOLD_TTL_SECONDS` environment variable.
-- Automatic release of abandoned holds: **lazy expiry** on the database clock
-  inside every claim/read + a background **sweeper** that materializes it.
-- **Async payment** through the PROVIDED gateway
-  (`asifmahmoud414/mock-gateway:latest` — no self-made mock): `/pay` returns
-  202 immediately; the gateway's callback confirms or fails the booking.
-  Payment attempts are persisted **before** `/charge` is called, so the
-  official callback-before-charge-response race is handled by design.
-  Duplicate callbacks are deduplicated by `event_id` (DB primary key).
-  `Idempotency-Key` is sent on every charge so retries can never double-charge.
-  Callback signatures (HMAC-SHA256 over the raw body) are **enforced**.
-- **OTP** send/verify proxied to the provided gateway; verification gates
-  payment.
-- **React frontend** (React 18 + TypeScript + Vite): browse movies/theatres/
-  shows, live seat map with selection, hold countdown, OTP + payment flow,
-  booking status polling. Served in production by nginx (SPA fallback +
-  same-origin `/api` proxy) — the bundle contains no backend hostnames.
-- **Docker Compose** stack (web + app + PostgreSQL 16 + provided gateway),
-  auto-migrate + auto-seed on boot, PostgreSQL named volume for persistence.
-- **CI** (GitHub Actions): integration tests against real PostgreSQL + a
-  clean-clone compose boot that replays Scenario A, Scenario B and the
-  gateway-down health drill on every PR and push to main.
+## Project Overview
 
-## What works (all verified — see docs/test-evidence/)
+CinemaSeat provides an interface for browsing movies, selecting showtimes, and booking tickets. Under heavy concurrent load—such as when booking premiere seats—multiple users will compete for the same seats. CinemaSeat preserves system correctness by ensuring that seat allocation remains correct and concurrency-safe: it guarantees that a seat can never be double-booked or oversold, even during sudden traffic spikes, while automatically releasing abandoned holds so that seats return to the available pool.
 
-| Area | Status |
-| --- | --- |
-| Health: `GET /health` 200, <10 ms, gateway down or not | ✅ verified |
-| Catalog + seat map | ✅ verified |
-| Hold (single + multi-seat all-or-nothing) | ✅ verified |
-| **Scenario A: 100 concurrent same-seat, 1/99/0** | ✅ verified (twice + in CI) |
-| **Scenario B: expiry + reclaim with env-driven short TTL** | ✅ verified (twice + in CI) |
-| Async pay → delayed callback → CONFIRMED | ✅ verified |
-| `X-Mock-Force: fail / duplicate / race / timeout` | ✅ all verified |
-| Duplicate callback: 200 + zero duplicate side effects | ✅ verified |
-| HMAC signature verification (enforce mode) | ✅ verified vs real gateway |
-| Gateway down ⇒ browse/seat-map/hold/health unaffected | ✅ verified |
-| Restart persistence (named volume) | ✅ verified |
-| Test suite (16 integration tests, real PostgreSQL) | ✅ 16/16 |
+## Hackathon Context
 
-## What does not work yet
+CinemaSeat was built during **Zero to Production — Phase 2: The Ultimate Hackathon** (also known as **The IEEECS Engineering Challenge**), held on **Saturday, 8 August 2026** at the CUET Campus. The event was organized by the **IEEE Computer Society, CUET Student Branch Chapter** in partnership with Poridhi.io.
 
-- **CD pipeline** not yet added (CI only).
-- No automated refund driver: a `SUCCEEDED` callback for a non-confirmable
-  attempt is flagged `needs_refund` and logged, but `/refund` is not yet
-  called automatically.
-- No reconciliation sweeper for bookings stuck in `PAYMENT_PENDING` beyond
-  the safety window (seats are protected for `PAYMENT_PENDING_TIMEOUT_SECONDS`,
-  default 600 s).
-- No Scenario C load-ramp report yet.
+**Hackathon submission:** The original submitted README is preserved in [`docs/README_SUBMITTED.md`](docs/README_SUBMITTED.md).
+
+## What Is Built
+
+The CinemaSeat platform includes the following features and integrations:
+
+| System / Feature | Integration & Capability |
+| :--- | :--- |
+| **Dynamic Catalog & Schedules** | Browse movies, theatres, and showtime schedules with automatic rolling dates. |
+| **Interactive Live Seat Map** | Real-time map displaying `AVAILABLE`, `HELD`, or `BOOKED` states with immediate reclaim. |
+| **Atomic Concurrency-Safe Holds** | Multi-seat (up to 10) all-or-nothing reservations secured via PostgreSQL row locks (`SELECT ... FOR UPDATE`) using configuration `HOLD_TTL_SECONDS`. |
+| **Automated Hold Reclamation** | Lazy expiration cleanup on queries coupled with a background sweeper daemon. |
+| **Asynchronous Payments** | Non-blocking checkout pipeline persisting payment attempts before gateway `/charge` invocation with `Idempotency-Key` support. |
+| **Webhook Signature Security** | Integrity validation of webhook callback payloads using HMAC-SHA256 signature verification (`enforce` mode). |
+| **OTP Verification Flow** | Phone-based SMS OTP dispatch and validation proxied via the gateway (`/otp/send` and `/otp/verify`) to gate booking confirmations. |
+| **Polished React Frontend** | Responsive React 18 SPA built with TypeScript/Vite, proxying same-origin `/api` requests and running countdowns. |
+| **Containerized Stack** | Docker Compose orchestration (`web`, `app`, `db`, `gateway`) featuring auto-migration/seeding on boot and named volume persistence. |
+| **Comprehensive Testing & CI** | Automated suite (Vitest + Postgres integration) running on GitHub Actions via a clean-clone compose boot verifying Scenario A, Scenario B, and gateway resilience. |
+
+## Key Engineering Features
+
+The platform achieves reliability and database correctness through several engineering mechanisms:
+
+- **Database-Driven Time**: Expirations and holds are checked against the database clock (`now()`), making the platform immune to application-tier clock drift.
+- **Deadlock Avoidance**: Multiple-seat locks are acquired in a deterministic order (`SELECT ... FOR UPDATE` ordered by `seat_id`), preventing deadlocks under concurrent demand.
+- **Webhook Signature Enforcement**: Signature validation mode computes the expected HMAC-SHA256 signature of the raw request payload and rejects forged or tampered webhook callbacks when set to `enforce` mode.
+- **Fault-Tolerant Integration**: Transaction attempts are saved to the database before outbound HTTP calls, preventing race conditions where callbacks reach the webhook endpoint before the `/charge` HTTP response returns.
+- **PostgreSQL Row Locking**: Serialization of conflicting transactions via PostgreSQL row-level locks on active show seats (`show_seats` table).
+- **Duplicate Callback Deduplication**: Prevent double-processing via unique event deduplication (`event_id` constraint) inside database transactions.
+- **Hold Expiration & Cleanup**: Automatic lazy reclaiming of expired holds during queries combined with a background sweeper daemon to reclaim seat resources.
+- **Timezone Standardization**: Dates and times are shifted to Bangladesh Standard Time (BST, UTC+6) before scheduling, preventing server-local timezone configuration differences (like UTC in Docker) from altering calendar shows.
 
 ## Architecture
 
+CinemaSeat runs as a containerized stack. In production, Nginx acts as the entry point, serving static React SPA assets and reverse proxying `/api/*` requests to the Fastify monolith.
+
 ```text
-                ┌────────────────────────────────────┐
- browser ─────▶ │  web — nginx (:8080)               │
-                │  React SPA bundle + SPA fallback   │
-                │  /api/* proxied same-origin ─────┐ │
-                └──────────────────────────────────┼─┘
-                                                   ▼
-                ┌────────────────────────────────────┐
- client ──────▶ │  app — Node 22 / Fastify monolith  │ ── /charge, /otp/* ──▶ ┌─────────────┐
-                │  catalog | booking | payment       │                        │   gateway   │
-                │  platform (config, db, migrate,    │ ◀── signed callbacks ─ │ (provided,  │
-                │  health, sweeper)                  │                        │  :9000)     │
-                └───────────────┬────────────────────┘                        └─────────────┘
-                                │ SQL transactions — the ONLY locking mechanism
-                        ┌───────▼────────┐
-                        │ PostgreSQL 16  │  one row per (show, seat) = the lock
-                        └────────────────┘
+                     ┌──────────────────────────────────────┐
+                     │               Browser                │
+                     └──────────────────┬───────────────────┘
+                                        │
+                                        ▼
+                     ┌──────────────────────────────────────┐
+                     │        Poridhi Load Balancer         │
+                     └──────────────────┬───────────────────┘
+                                        │
+                                        ▼
+                     ┌──────────────────────────────────────┐
+                     │             web (Nginx)              │
+                     │  - Serves React SPA                  │
+                     │  - Reverse-proxies /api/* to backend │
+                     └──────────────────┬───────────────────┘
+                                        │
+                                        ▼
+                     ┌──────────────────────────────────────┐
+                     │   Fastify Monolithic Backend (:3000) │
+                     └──────┬────────────────────────┬──────┘
+                            │                        │
+                            │                        │ POST /otp/*, /charge
+                            ▼                        ▼
+              ┌──────────────────────────┐      ┌──────────────────────────┐
+              │      PostgreSQL 16       │      │   Mock Payment Gateway   │
+              │  - Authoritative state   │      │  - Port 9000             │
+              │  - Row-level locks       │      │  - Sends signed webhooks │
+              └──────────────────────────┘      └────────────┬─────────────┘
+                                                             │
+                                                             │ Webhook Callback
+                                                             │ (HMAC Signed)
+                                                             ▼
+                                                ┌──────────────────────────┐
+                                                │   Fastify Webhook API    │
+                                                └──────────────────────────┘
 ```
 
-**Concurrency invariant:** one `show_seats` row per (show, seat). Every hold
-locks its target rows with `SELECT … ORDER BY seat_id FOR UPDATE`, re-checks
-state under the lock, and claims with a conditional `UPDATE`. 100 concurrent
-requests for one seat serialize on that one row lock: the first commit wins,
-the other 99 see a live hold and get `409`. No in-memory locks anywhere, so
-any number of app replicas stays correct. Expiry uses the **database clock**
-(`now()`), never app clocks. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For local Docker Compose deployment, the relevant services are:
+- **`web` (Nginx)**: Serves the static React frontend SPA and reverse-proxies relative `/api/*` requests to the backend, preserving clean relative URLs on the client.
+- **`app` (Fastify Monolith)**: Executes API routes, core business logic, webhook signature validations, and coordinates the background hold sweeper.
+- **`db` (PostgreSQL 16)**: Holds the authoritative seat state and transaction history. Ensures concurrency-safety via row-level locks and ordering constraints.
+- **`gateway` (Mock Payment Gateway)**: Provided container service that simulates the external phone-based OTP dispatch and async payment charge loops, sending HMAC-signed webhook callbacks.
 
-## Clean clone → running stack
+## Booking Flow
 
-Prereqs: Docker with Compose v2. Nothing else.
+The booking lifecycle manages the asynchronous transaction flow across the application, database, and mock gateway:
+
+```text
+[Seat Hold] ──► [OTP Verification] ──► [Persist Payment] ──► [Gateway /charge]
+                                                                     │
+[State Update] ◄── [Callback Validation] ◄── [Async Callback] ◄── [202 PENDING]
+      │
+      └─► [Frontend Polling]
+```
+
+
+
+1. **Seat Selection & Hold**: The user selects seats in the React frontend. The application requests an atomic temporary hold on the database, locking the selected seats for a configured TTL (`HOLD_TTL_SECONDS`).
+2. **OTP Dispatch**: The frontend requests an OTP via the `/api/bookings/:ref/otp/send` route, which forwards to the mock gateway to send a code.
+3. **OTP Verification**: The user inputs the OTP. The application verifies the code against the gateway via `/api/bookings/:ref/otp/verify`.
+4. **Persist Payment Attempt**: Before invoking the gateway's charge endpoint, the backend creates a payment attempt record in the PostgreSQL database. This ordering guarantees that webhook callbacks arriving early do not bypass registration.
+5. **Gateway Charge Request**: The backend calls `/charge` on the mock gateway.
+6. **Immediate Pending Response**: The gateway returns a `202 PENDING` status immediately, and the backend returns this status to the frontend.
+7. **Webhook Callback**: Once the payment is processed by the gateway, it delivers an asynchronous webhook callback to `/api/payments/callback` containing the final state (`SUCCEEDED` or `FAILED`).
+8. **Signature Validation**: The application intercepts the webhook callback, validates its HMAC-SHA256 signature using the shared secret, and extracts the event payload.
+9. **Deduplication & State Update**: The application processes the webhook inside a database transaction, verifying the transaction was not already processed (deduplication by `event_id`). It updates the booking and payment status, and changes seat states from `HELD` to `BOOKED` (or releases them).
+10. **Frontend Polling & Confirmation**: The React client polls `/api/bookings/:ref` in the background, detects the updated status, and shows the success or failure screen.
+11. **Hold Reclaiming**: If a user abandons the flow before finishing, the database locks are lazily freed on subsequent seat map queries, or actively swept by the background daemon.
+
+## Reliability & Concurrency
+
+The CinemaSeat architecture is built around one core invariant: **a seat must never be confirmed for more than one user**. Under heavy concurrent load, system correctness is preserved through strict database-level constraints:
+
+### Concurrency Mechanisms
+
+- **Authoritative State**: PostgreSQL serves as the single source of truth for all seat allocations.
+- **Row-Level Serialization**: Transactions attempting to modify or hold a seat serialize access using `SELECT ... FOR UPDATE` on the target `show_seats` table rows.
+- **Deterministic Lock Ordering**: Multi-seat reservations lock rows in ascending order of `seat_id` to prevent database deadlocks.
+- **Database-Driven Time**: Seat hold expiration rules evaluate against the database system clock (`now()`), keeping expiration behaviors immune to application-tier clock drift.
+- **Reclaimable Expired Holds**: Expired seat holds are freed lazily during subsequent booking queries or actively cleaned up by a background sweeper daemon.
+- **Outbound Race Protection**: Payment attempts are recorded in the database before making outbound gateway calls. This guarantees the application has record of the transaction if the webhook callback arrives before the API receives the `/charge` HTTP response.
+- **HMAC Signature Validation**: Webhook payloads are verified against forged requests by validating the SHA-256 HMAC signature using a shared gateway secret.
+- **Idempotent Deduplication**: Webhook events are deduplicated inside database transactions by enforcing a primary key constraint on the gateway `event_id`.
+
+### Concurrency Scenarios & Verified Results
+
+These concurrency patterns were verified during the CUET campus hackathon on **Saturday, 8 August 2026**:
+
+#### Scenario A: High-Concurrency Hotspotting (100 Concurrent Requests)
+- **Conditions**: 100 simultaneous requests competing to hold the exact same seat.
+- **Results**:
+  - **1** successful seat hold.
+  - **99** clean `409 Conflict` client rejections.
+  - **0** oversells or double-bookings.
+
+#### Scenario B: Hold Expiration & Reclaiming
+- **Conditions**: User A requests a seat hold, which is granted. User B attempts to claim the same seat.
+- **Results**:
+  - User B is blocked with a `409 Conflict` status while User A's hold is active.
+  - User A's hold expires (configured with a 5-second TTL).
+  - The seat returns to the available pool.
+  - User B successfully claims the seat on the next attempt.
+
+## Payment & OTP Gateway
+
+CinemaSeat integrates with the provided hackathon mock gateway (`asifmahmoud414/mock-gateway:latest`) to handle verification and billing cycles:
+
+| Capability | Integration Behavior |
+| :--- | :--- |
+| **Payment Flow** | Outgoing `/charge` requests receive an immediate `202 PENDING` response, with final states delivered asynchronously to `/api/payments/callback`. |
+| **OTP Verification** | Gates booking confirmation through mandatory OTP delivery (`/otp/send`) and verification (`/otp/verify`) endpoints. |
+| **Callback Endpoint** | Receives webhook notifications containing final transaction status (`SUCCEEDED` or `FAILED`). |
+| **Signature Security** | Enforces authenticity using SHA-256 HMAC headers computed using the shared secret `z2p-2026-secret`. |
+| **Failure Modes** | Simulates failure, timeout, race, and duplicate callbacks by passing control headers (`X-Mock-Force`) to the gateway. |
+| **Refund Management** | Dispatches refund requests to `/refund` for transactions that fail validation or are superseded. |
+
+## Technology Stack
+
+| Layer | Technology | Purpose |
+| :--- | :--- | :--- |
+| **Frontend** | React 18, TypeScript, Vite | Client SPA and booking interfaces |
+| **Routing** | React Router DOM 6 | Client-side page navigation |
+| **Frontend Testing** | Vitest, React Testing Library | Unit and component test suites |
+| **Backend** | Node.js 22, Fastify 5 | API routes, business logic, webhook processing |
+| **Database** | PostgreSQL 16 | Relational data persistence, row locks, transaction boundary |
+| **Database Driver** | node-postgres (`pg`) | Postgres client connections and execution |
+| **Web Server** | Nginx 1.27 | Serves SPA assets and reverse-proxies `/api` traffic |
+| **Infrastructure** | Docker, Docker Compose | Containerised deployment stack orchestration |
+| **Gateway** | `asifmahmoud414/mock-gateway:latest` | Mock OTP generation and asynchronous payment processing |
+
+## Repository Structure
+
+```text
+CinemaSeat/
+├── database/                            # PostgreSQL migrations, schema definition, and seed scripts
+├── docs/                                # Documentation and verification artifacts
+│   ├── audits/                          # Frozen hackathon checkpoint and readiness audits
+│   │   ├── CI_CHECKPOINT_2026-08-08.md
+│   │   ├── PRODUCTION_READINESS_AUDIT_2026-08-08.md
+│   │   └── REQ25_PAYMENT_RECOVERY_INVESTIGATION_2026-08-08.md
+│   ├── current/                         # Post-hackathon current-state documentation and evidence
+│   │   ├── audits/                      # Audits of current-state system characteristics (CURRENT_STATE_AUDIT.md)
+│   │   └── test-evidence/               # Active verification runs (CURRENT_RUNTIME_VERIFICATION.md)
+│   ├── reference/                       # Hackathon problem statement and gateway specifications
+│   │   ├── CinemaSeat_Gateway_Reference.docx
+│   │   └── CinemaSeat_Problem_Statement.docx
+│   ├── test-evidence/                   # Frozen hackathon-era verification logs
+│   ├── ARCHITECTURE.md                  # Detailed technical architecture design
+│   ├── ARCHITECTURE_SUBMITTED.md        # Snapshot of the original submitted architecture
+│   ├── DECISIONS_SUBMITTED.md           # Snapshot of the original submitted decisions
+│   ├── DEPLOYMENT.md                    # Production deployment instruction manual
+│   ├── HACKATHON_KILL_LIST.md           # List of deprecated mock features removed
+│   ├── README_SUBMITTED.md              # Original repository README submitted for evaluation
+│   └── REQUIREMENTS.md                  # Business rule and core constraint tracing matrix
+├── frontend/                            # React client single-page application
+│   ├── src/                             # React components, routing configuration, and custom hooks
+│   ├── Dockerfile                       # Multi-stage production container build (SPA + Nginx)
+│   └── nginx.conf                       # Nginx routing rules and API proxy configuration
+├── scripts/                             # E2E test runners and verification scripts
+├── src/                                 # Fastify backend monolithic API code
+├── test/                                # Backend integration and concurrency test suites
+├── .env.example                         # Template configuration for environment variables
+├── DECISIONS.md                         # Architectural Decisions Record (ADR)
+├── Dockerfile                           # Production Fastify backend container image builder
+├── docker-compose.yml                   # Docker Compose configuration orchestrating the entire stack
+└── README.md                            # Project documentation (this file)
+```
+
+## Running Locally
+
+Follow these steps to deploy the application stack in a local containerized environment.
+
+### Prerequisites
+
+* Docker and Docker Compose (v2) installed.
+
+### Start the stack
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/sourovchy/CinemaSeat.git
+   cd CinemaSeat
+   ```
+
+2. **Launch the services**:
+   ```bash
+   docker compose up --build
+   ```
+   *This initializes the PostgreSQL database (applying migrations and seeds), launches the Fastify backend API, boots the Nginx web server, and starts the mock payment gateway container.*
+
+### Access the services
+
+Once the containers are online, access the following local endpoints:
+
+* **Frontend UI**: [http://localhost:8080](http://localhost:8080)
+* **Backend API**: [http://localhost:3000](http://localhost:3000)
+* **Mock Gateway**: [http://localhost:9000](http://localhost:9000)
+
+### Optional configuration
+
+To modify environment variables (such as the seat hold TTL duration), create a local configuration file:
 
 ```bash
-git clone https://github.com/sourovchy/SeatLock.git
-cd SeatLock
-docker compose up --build
+cp .env.example .env
 ```
 
-That single command starts PostgreSQL, the provided gateway, the app and the
-production frontend; the app migrates and seeds automatically.
-UI: `http://localhost:8080` · API: `http://localhost:3000`.
-
-Judges' short-TTL run (everything else identical):
-
+To test the hold expiration behavior directly with a short 5-second TTL, run:
 ```bash
 HOLD_TTL_SECONDS=5 docker compose up --build
 ```
 
-No `.env` file is required — copy `.env.example` to `.env` only to override
-defaults. Never commit real secrets.
+## API / Verification Endpoints
 
-## Exact request: hold a seat
+The Fastify backend exposes the following primary endpoints:
 
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /health` | Basic API runtime check. |
+| `GET /ready` | Checks database connectivity. |
+| `GET /api/movies` | Retrieves the movie catalog. |
+| `GET /api/theatres` | Retrieves the theatre catalog. |
+| `GET /api/shows` | Retrieves the showtimes list. |
+| `GET /api/shows/:id/seats` | Retrieves seat status map (`AVAILABLE`, `HELD`, `BOOKED`). |
+| `POST /api/shows/:id/hold` | Creates an atomic seat hold (up to 10 seats). |
+| `GET /api/bookings/:ref` | Returns booking and payment status (frontend polling endpoint). |
+| `POST /api/bookings/:ref/otp/send` | Dispatches a transaction validation OTP via the gateway. |
+| `POST /api/bookings/:ref/otp/verify` | Validates the user's OTP to unlock the payment pipeline. |
+| `POST /api/bookings/:ref/pay` | Starts asynchronous payment, returning `202 PENDING`. |
+| `POST /api/payments/callback` | Webhook listener verifying HMAC-SHA256 signatures for async payment updates. |
+| `GET /api/config` | Returns active hold TTL and background cleanup configs. |
+
+### Exact Verification Requests
+
+Judges will run tests against these exact paths and formats to verify the hold and seat map behaviors:
+
+#### 1. Hold a Seat
 ```bash
 curl -X POST http://localhost:3000/api/shows/1/hold \
   -H "Content-Type: application/json" \
   -d '{"seat_ids":[1001],"customer_name":"Alice","customer_phone":"01700000000"}'
 ```
 
-`201`:
-
+Successful Response (`201 Created`):
 ```json
-{"booking_ref":"bk_4e28cbf3c911","booking_id":"…","show_id":1,"seat_ids":[1001],
- "status":"HELD","amount_cents":45000,"hold_ttl_seconds":120,
- "hold_expires_at":"2026-08-08T05:06:31.000Z"}
+{
+  "booking_ref": "bk_4e28cbf3c911",
+  "booking_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "show_id": 1,
+  "seat_ids": [1001],
+  "status": "HELD",
+  "amount_cents": 45000,
+  "hold_ttl_seconds": 120,
+  "hold_expires_at": "2026-08-08T05:06:31.000Z"
+}
 ```
 
-If the seat is taken — `409`:
-
+Unavailable/Conflict Response (`409 Conflict`):
 ```json
-{"error":"SEAT_UNAVAILABLE","unavailable_seat_ids":[1001]}
+{
+  "error": "SEAT_UNAVAILABLE",
+  "unavailable_seat_ids": [1001]
+}
 ```
 
-## Exact request: fetch a seat map
-
+#### 2. Fetch a Seat Map
 ```bash
 curl http://localhost:3000/api/shows/1/seats
 ```
 
-`200`:
-
+Response (`200 OK`):
 ```json
-{"show_id":1,
- "seats":[{"seat_id":1001,"row_label":"A","seat_number":1,"status":"AVAILABLE"}, …],
- "summary":{"available":79,"held":1,"booked":0}}
+{
+  "show_id": 1,
+  "seats": [
+    {
+      "seat_id": 1001,
+      "row_label": "A",
+      "seat_number": 1,
+      "status": "AVAILABLE"
+    }
+  ],
+  "summary": {
+    "available": 79,
+    "held": 1,
+    "booked": 0
+  }
+}
 ```
 
-## Full API
+## Testing & Verification
 
-| Method & path | Purpose |
-| --- | --- |
-| `GET /health` | judge hook: static 200, no dependencies |
-| `GET /ready` | DB-ping readiness (orchestration only) |
-| `GET /api/movies` · `/api/theatres` · `/api/shows` | catalog |
-| `GET /api/shows/:id/seats` | live seat map |
-| `POST /api/shows/:id/hold` | atomic hold (body above) |
-| `GET /api/bookings/:ref` | booking + payment status (poll this after /pay) |
-| `POST /api/bookings/:ref/otp/send` | send OTP via provided gateway |
-| `POST /api/bookings/:ref/otp/verify` | body `{"code":"123456"}` (deterministic mode) |
-| `POST /api/bookings/:ref/pay` | async payment — 202 immediately |
-| `POST /api/payments/callback` | gateway-only signed webhook |
-| `GET /api/config` | effective TTL/sweep knobs (no secrets) |
+CinemaSeat correctness is validated through automated test runs and scenario drills:
 
-Booking flow: hold → otp/send → otp/verify → pay → poll `GET /api/bookings/:ref`
-until `CONFIRMED` (or `FAILED`). `X-Mock-Mode` / `X-Mock-Force` headers are
-forwarded to the gateway for testing (don't combine `deterministic` with a
-force header — deterministic always succeeds).
+### Frontend Validation
+* **Typecheck**: `PASS` (TypeScript compilation analysis)
+* **Unit & Integration**: `23 tests PASS` (Vitest suite verifying client components)
+* **Production Build**: `PASS` (Vite production bundle packaging checks)
 
-## Environment configuration
+### Backend Validation
+* **Integration Suite**: `17 tests PASS` (Node.js test runner verifying transactional operations against PostgreSQL)
+* **Timezone Unit**: `5 tests PASS` (Node.js test runner verifying host-timezone independence)
+* **Scenario A Drill**: `PASS` (100-concurrent ticket-burst safety)
+* **Scenario B Drill**: `PASS` (Seat reclamation on hold expiration)
 
-All via environment (see [.env.example](.env.example)):
-`HOLD_TTL_SECONDS` (**never hardcoded**), `PAYMENT_PENDING_TIMEOUT_SECONDS`,
-`SWEEP_INTERVAL_SECONDS`, `PORT`/`APP_PORT`, `WEB_PORT` (public frontend
-port, default 8080), `DATABASE_URL`, `PGPOOL_MAX`,
-`GATEWAY_URL`, `GATEWAY_TIMEOUT_MS`, `PUBLIC_CALLBACK_URL` (must be reachable
-**from inside the gateway container** → Docker service DNS `http://app:3000/…`,
-never localhost), `GATEWAY_SECRET`, `GATEWAY_SIGNATURE_MODE` (off|log|enforce),
-`OTP_REQUIRED`.
+### Gateway Integration Testing
+* **Success callback processing**: `PASS`
+* **Failure callback processing**: `PASS`
+* **Duplicate callback handling**: `PASS`
+* **Callback race condition prevention**: `PASS`
+* **Timeout error handling**: `PASS`
 
-## Testing
+### Container Orchestration & E2E Validation
+* **Docker Compose Deployment**: `PASS` (Clean stack start, database migration execution, and container health checks)
+* **End-to-End User Verification**: `PASS` (Flow validation from browsing seats to webhook callback reception)
 
-```bash
-docker compose up -d db          # tests need the real PostgreSQL (host port 5433)
-npm ci
-npm test                         # 16 integration tests incl. Scenario A + B
-```
+### Concurrency Verification Results
 
-Scenario drills against a running stack (what CI runs on every push/PR):
+These outcomes were verified on the live composed stack:
 
-```bash
-node scripts/scenario-a.mjs                          # 100-concurrent same-seat burst
-HOLD_TTL_SECONDS=5 docker compose up -d && node scripts/scenario-b.mjs
-node scripts/payment-smoke.mjs                       # gateway force-header drill
-```
+1. **Scenario A: One Seat, Many Buyers (100 Concurrent Requests)**
+   - **Conditions**: 100 concurrent requests competing for the exact same seat (`seat_id: 1001`) on show 1.
+   - **Outcome**:
+     - **Requests Sent**: 100
+     - **Successful Holds**: 1
+     - **Rejections (409)**: 99
+     - **Oversell Count**: 0
+     - **Seat Map Verification**: The seat map reports the seat status as `HELD` with exactly one owner.
+   - **Verification Logs**: Detailed evidence is available in [`docs/test-evidence/scenario-a-2026-08-08.md`](docs/test-evidence/scenario-a-2026-08-08.md).
 
-Note: the test suite and drills mutate booking data — run them against the
-local compose stack, not a production database.
+2. **Scenario B: The Abandoned Hold & Expiration Recovery**
+   - **Conditions**: User A claims a temporary seat hold (`seat_id: 1002`, `HOLD_TTL_SECONDS=5`), then walks away. User B attempts to book the same seat.
+   - **Observed Timeline**:
+     - `04:52:39.801Z`: User A successfully holds seat 1002 (booking ref `bk_3a5631e7a216`), payment remains pending.
+     - `04:52:39.809Z`: User B attempts to book and is rejected with `409 Conflict` while User A's hold is active.
+     - `04:52:47.827Z`: The seat map shows the seat state as `AVAILABLE` again (after TTL + margin).
+     - `04:52:47.836Z`: User A's booking reads `EXPIRED` in the database.
+     - `04:52:47.847Z`: User B successfully claims the seat on the next attempt (booking ref `bk_66dbc3a37109`).
+   - **Verification Logs**: Detailed timeline logs are available in [`docs/test-evidence/scenario-b-2026-08-08.md`](docs/test-evidence/scenario-b-2026-08-08.md).
 
-## Scenario A result (2026-08-08, real stack)
 
-```text
-REQUESTS SENT: 100 · SUCCESSFUL HOLDS: 1 · REJECTIONS (409): 99 · OVERSELL: 0
-SEAT MAP AFTER BURST: seat 1001 = HELD (exactly one owner in the database)
-```
 
-Full output + DB proof: [docs/test-evidence/scenario-a-2026-08-08.md](docs/test-evidence/scenario-a-2026-08-08.md)
+## Documentation
 
-## Scenario B result (2026-08-08, real stack, `HOLD_TTL_SECONDS=5`)
+For detailed architecture, design decisions, deployment, requirements, and project references, see:
 
-```text
-04:52:39.801Z User A holds seat 1002 (bk_3a5631e7a216), never pays
-04:52:39.809Z User B rejected 409 while the hold is live
-04:52:47.827Z seat map shows AVAILABLE again (TTL 5s + margin)
-04:52:47.836Z booking A reads EXPIRED
-04:52:47.847Z User B successfully holds the same seat (bk_66dbc3a37109)
-```
+### Living Documentation
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — Design patterns, state transitions, locking strategies.
+- [DECISIONS.md](DECISIONS.md) — Record of structural design choices and trade-offs.
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — Local setup, deployment, configuration, and operational checks.
+- [REQUIREMENTS.md](docs/REQUIREMENTS.md) — Full business and system requirement mappings.
 
-Full timeline + sweeper/DB proof: [docs/test-evidence/scenario-b-2026-08-08.md](docs/test-evidence/scenario-b-2026-08-08.md)
+### Current-State Audits & Verification
+- [CURRENT_STATE_AUDIT.md](docs/current/audits/CURRENT_STATE_AUDIT.md) — Current post-hackathon architecture, rules, and known limitations.
+- [CURRENT_RUNTIME_VERIFICATION.md](docs/current/test-evidence/CURRENT_RUNTIME_VERIFICATION.md) — Current frontend and backend validation results.
 
-## Frontend development
+### Historical Hackathon Submissions (Frozen Snapshot)
+- [Problem Statement](docs/reference/CinemaSeat_Problem_Statement.docx)
+- [Gateway Technical Reference](docs/reference/CinemaSeat_Gateway_Reference.docx)
+- [README submitted during the hackathon](docs/README_SUBMITTED.md)
 
-```bash
-cd frontend
-npm ci
-npm run dev          # Vite dev server on :5173, proxies /api to :3000
-npm run typecheck && npm test && npm run build
-```
+## Post-Hackathon Improvements
 
-In production the frontend is a separate compose service (`web`): a
-multi-stage Docker build compiles the bundle and nginx serves it with SPA
-fallback, proxying `/api/*` (plus `/health` and `/ready`) to the backend over
-the compose network. The application code only ever uses relative `/api/*`
-URLs, so no CORS configuration and no per-environment rebuild are needed.
+After submission, the project went through a focused round of testing and refinement.
 
-## Deployed URL
-
-**Live on Poridhi:**
-
-https://6a1de2095dde7994028d89e7_4fd4d7ff.lb.poridhi.io
-
-## Repository documentation
-
-- [DECISIONS.md](DECISIONS.md) — the three architectural decisions and their trade-offs
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full design: state machines, locking rules, payment races
-- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — requirement matrix
-- [docs/test-evidence/](docs/test-evidence/) — verbatim proof runs
+- Polished the **frontend experience** with UI, usability, and performance refinements.
+- Improved **data correctness and consistency** across shows, seats, bookings, and dates.
+- Added **automatic rolling show schedules** so the application remains functional as real dates move forward.
+- Strengthened **booking and seat concurrency handling** under real-world concurrent load.
+- Tightened **date and timezone handling** for more reliable show availability.
+- Expanded **testing, validation, and reliability checks** across the application.

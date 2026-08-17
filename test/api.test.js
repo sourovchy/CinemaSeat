@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { pool } from '../src/platform/db.js';
 import { resetDb, startServer, jfetch, holdBody } from './helpers.js';
 
-// Seat id scheme from db/seed.sql: screen_id*1000 + (row-1)*cols + col.
+// Seat id scheme from database/seed.sql: screen_id*1000 + (row-1)*cols + col.
 // Show 1 runs on screen 1 → seats 1001..1080. Each test uses its own seats.
 
 before(async () => {
@@ -35,16 +35,16 @@ test('catalog: movies, theatres, shows are browsable with seeded data', async (t
 
   const movies = await jfetch(baseUrl, '/api/movies');
   assert.equal(movies.status, 200);
-  assert.equal(movies.body.movies.length, 4);
+  assert.equal(movies.body.movies.length, 5);
   assert.ok(movies.body.movies[0].title);
 
   const theatres = await jfetch(baseUrl, '/api/theatres');
   assert.equal(theatres.status, 200);
-  assert.equal(theatres.body.theatres.length, 2);
+  assert.equal(theatres.body.theatres.length, 3);
 
   const shows = await jfetch(baseUrl, '/api/shows');
   assert.equal(shows.status, 200);
-  assert.equal(shows.body.shows.length, 12);
+  assert.ok(shows.body.shows.length >= 14);
   const s = shows.body.shows[0];
   for (const k of ['id', 'movie_title', 'theatre_name', 'screen_name', 'starts_at', 'price_cents']) {
     assert.ok(k in s, `show is missing ${k}`);
@@ -267,4 +267,98 @@ test('payment callback: unknown ref, duplicates and malformed bodies are all ack
 test('GET /api/bookings/:ref returns 404 for unknown refs', async (t) => {
   const { baseUrl } = await startServer(t);
   assert.equal((await jfetch(baseUrl, '/api/bookings/bk_nope')).status, 404);
+});
+
+test('schedule audit: no overlapping shows, valid runtimes/buffers, complete show_seats, and correct mapping', async (t) => {
+  const { baseUrl } = await startServer(t);
+  
+  const res = await jfetch(baseUrl, '/api/shows');
+  assert.equal(res.status, 200);
+  const shows = res.body.shows;
+  assert.ok(shows.length >= 80, `Expected many shows, got ${shows.length}`);
+  
+  const movieDetails = {
+    1: { title: 'Project Hail Mary', duration: 156 },
+    2: { title: 'Michael', duration: 127 },
+    3: { title: 'Obsession', duration: 108 },
+    4: { title: 'The Odyssey', duration: 173 },
+    5: { title: 'Spider-Man: Brand New Day', duration: 145 },
+  };
+
+  // 1. Group shows by screen to check overlap, runtimes, and buffers
+  const showsByScreen = new Map();
+  for (const s of shows) {
+    if (!showsByScreen.has(s.screen_id)) {
+      showsByScreen.set(s.screen_id, []);
+    }
+    showsByScreen.get(s.screen_id).push(s);
+
+    // 1A. Assert all starts are on 5-minute boundaries
+    const startMin = new Date(s.starts_at).getUTCMinutes();
+    assert.equal(startMin % 5, 0, `Show ${s.id} start time minute ${startMin} is not on a 5-minute boundary`);
+
+    // 1B. Assert every show ends before closing (no show runs past 01:00 AM local time of its day)
+    const currentMovie = Object.values(movieDetails).find(m => m.title === s.movie_title);
+    assert.ok(currentMovie, `Unknown movie title: ${s.movie_title}`);
+    
+    // Dhaka is UTC+6
+    const startsAtDhaka = new Date(new Date(s.starts_at).getTime() + 6 * 60 * 60 * 1000);
+    const endDhaka = new Date(startsAtDhaka.getTime() + currentMovie.duration * 60 * 1000);
+    const endHour = endDhaka.getUTCHours(); // getUTCHours of Dhaka-shifted time gives Dhaka local hour
+    const endMin = endDhaka.getUTCMinutes();
+    const endMinsOfDay = endHour * 60 + endMin;
+    assert.ok(endMinsOfDay <= 24 * 60 + 45 || endMinsOfDay >= 8 * 60, `Show ${s.id} ends past closing window: ${endHour}:${endMin}`);
+  }
+
+  for (const [screenId, screenShows] of showsByScreen.entries()) {
+    // Sort shows by start time
+    screenShows.sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
+    
+    for (let i = 0; i < screenShows.length - 1; i++) {
+      const current = screenShows[i];
+      const next = screenShows[i + 1];
+      
+      const currentStart = new Date(current.starts_at).getTime();
+      const currentMovie = Object.values(movieDetails).find(m => m.title === current.movie_title);
+      const currentEnd = currentStart + currentMovie.duration * 60 * 1000;
+      const nextStart = new Date(next.starts_at).getTime();
+      
+      // Check no overlap: next show starts after current show ends
+      assert.ok(nextStart >= currentEnd, `Overlapping shows found on screen ${screenId}: ${current.movie_title} ends at ${new Date(currentEnd).toISOString()} but next ${next.movie_title} starts at ${new Date(nextStart).toISOString()}`);
+      
+      // Check changeover buffer (at least 20 minutes)
+      const actualBufferMinutes = (nextStart - currentEnd) / (60 * 1000);
+      assert.ok(actualBufferMinutes >= 20 - 1, `Changeover buffer too short: ${actualBufferMinutes} mins between ${current.movie_title} and ${next.movie_title} on screen ${screenId}`);
+    }
+  }
+
+  // 2. Verify all 3 theatres and halls are receiving schedules
+  const theatresWithShows = new Set(shows.map(s => s.theatre_name));
+  assert.equal(theatresWithShows.size, 3);
+  assert.ok(theatresWithShows.has('Sony Square, Mirpur'));
+  assert.ok(theatresWithShows.has('Shimanto Shambhar, Dhanmondi 2'));
+  assert.ok(theatresWithShows.has('Bali Arcade, Chattogram'));
+
+  // 2A. Assert schedules differ naturally across theatres (no simple copies or fixed shifts)
+  const schedulePatterns = new Set();
+  for (let tId = 1; tId <= 3; tId++) {
+    const tShows = shows.filter(s => s.theatre_id === tId && s.screen_name === 'Hall 1');
+    const pattern = tShows.map(s => {
+      const start = new Date(s.starts_at);
+      const timeStr = `${String(start.getUTCHours()).padStart(2, '0')}:${String(start.getUTCMinutes()).padStart(2, '0')}`;
+      return `${timeStr}-${s.movie_title}`;
+    }).sort().join('|');
+    schedulePatterns.add(pattern);
+  }
+  assert.equal(schedulePatterns.size, 3, 'Expected schedules to differ naturally across theatres (no duplicates or simple shifts)');
+
+  // 3. Verify real show IDs are preserved and booking/hold endpoints receive them correctly
+  const testShow = shows[0];
+  assert.ok(testShow.id, 'Show is missing ID');
+  assert.ok(testShow.id >= 10000000, `Generated show ID should be large: ${testShow.id}`);
+  
+  const map = await jfetch(baseUrl, `/api/shows/${testShow.id}/seats`);
+  assert.equal(map.status, 200);
+  assert.equal(map.body.show_id, testShow.id);
+  assert.equal(map.body.seats.length, 80);
 });

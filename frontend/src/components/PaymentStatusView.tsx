@@ -9,7 +9,9 @@ export function PaymentStatusView({ booking }: PaymentStatusProps) {
     case 'PAYMENT_PENDING':
       return (
         <div className="state state-pending" role="status" aria-live="polite">
-          <div className="spinner" aria-hidden="true" />
+          <div className="state-icon">
+            <div className="spinner" style={{ width: 24, height: 24 }} aria-hidden="true" />
+          </div>
           <strong>Payment pending</strong>
           <p>
             We have submitted your payment. Waiting for the gateway to confirm.
@@ -20,6 +22,7 @@ export function PaymentStatusView({ booking }: PaymentStatusProps) {
     case 'HELD':
       return (
         <div className="state state-info" role="status">
+          <div className="state-icon">💳</div>
           <strong>Awaiting payment</strong>
           <p>Hold is active. Start payment below.</p>
         </div>
@@ -27,6 +30,7 @@ export function PaymentStatusView({ booking }: PaymentStatusProps) {
     case 'CONFIRMED':
       return (
         <div className="state state-success" role="status">
+          <div className="state-icon">✓</div>
           <strong>Payment successful</strong>
           <p>Your booking is confirmed.</p>
         </div>
@@ -34,6 +38,7 @@ export function PaymentStatusView({ booking }: PaymentStatusProps) {
     case 'FAILED':
       return (
         <div className="state state-error" role="alert">
+          <div className="state-icon">✕</div>
           <strong>Payment failed</strong>
           <p>
             The gateway did not confirm this payment. Your seats have been
@@ -43,7 +48,8 @@ export function PaymentStatusView({ booking }: PaymentStatusProps) {
       );
     case 'EXPIRED':
       return (
-        <div className="state state-error" role="alert">
+        <div className="state state-warning" role="alert">
+          <div className="state-icon">⏱</div>
           <strong>Hold expired</strong>
           <p>The hold on your seats expired before payment completed.</p>
         </div>
