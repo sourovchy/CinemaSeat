@@ -2,7 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pool } from './db.js';
-import { ensureTemplateShows } from '../catalog/generator.js';
+import { ensureTemplateShows, ensureUpcomingShows } from '../catalog/generator.js';
 
 const dbDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'database');
 
@@ -43,6 +43,8 @@ export async function migrateAndSeed() {
     console.log('seed: applied (idempotent)');
     await ensureTemplateShows(client);
     console.log('template shows: generated/seeded (idempotent)');
+    await ensureUpcomingShows();
+    console.log('upcoming shows: generated/seeded (idempotent)');
   } finally {
     await client.query('SELECT pg_advisory_unlock(727001)').catch(() => {});
     client.release();

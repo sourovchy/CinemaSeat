@@ -362,3 +362,60 @@ test('schedule audit: no overlapping shows, valid runtimes/buffers, complete sho
   assert.equal(map.body.show_id, testShow.id);
   assert.equal(map.body.seats.length, 80);
 });
+
+test('GET /api/shows: repeated concurrent requests execute quickly without blocking', async (t) => {
+  const { baseUrl } = await startServer(t);
+
+  // Send 20 concurrent requests to /api/shows
+  const t0 = performance.now();
+  const responses = await Promise.all(
+    Array.from({ length: 20 }, () => jfetch(baseUrl, '/api/shows'))
+  );
+  const elapsedMs = performance.now() - t0;
+
+  for (const res of responses) {
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.body.shows));
+    assert.ok(res.body.shows.length >= 14);
+  }
+
+  // All 20 requests should complete swiftly since show generation is decoupled from the read path
+  assert.ok(elapsedMs < 1000, `20 concurrent /api/shows requests took ${elapsedMs}ms, expected < 1000ms`);
+});
+
+test('ensureUpcomingShows: idempotent and safe under concurrent executions', async () => {
+  const { ensureUpcomingShows } = await import('../src/catalog/generator.js');
+
+  // Count shows and show_seats before
+  const beforeShows = await pool.query('SELECT count(*)::int AS c FROM shows');
+  const beforeSeats = await pool.query('SELECT count(*)::int AS c FROM show_seats');
+
+  // Run multiple concurrent ensureUpcomingShows calls
+  await Promise.all([
+    ensureUpcomingShows(),
+    ensureUpcomingShows(),
+    ensureUpcomingShows(),
+  ]);
+
+  // Count shows and show_seats after - counts must remain identical (idempotency)
+  const afterShows = await pool.query('SELECT count(*)::int AS c FROM shows');
+  const afterSeats = await pool.query('SELECT count(*)::int AS c FROM show_seats');
+
+  assert.equal(afterShows.rows[0].c, beforeShows.rows[0].c, 'Show count must remain identical');
+  assert.equal(afterSeats.rows[0].c, beforeSeats.rows[0].c, 'Seat count must remain identical');
+});
+
+test('inventory integrity: every upcoming show has exactly 80 seats in show_seats', async () => {
+  const { rows } = await pool.query(
+    `SELECT sh.id, count(ss.seat_id)::int AS seat_count
+       FROM shows sh
+       LEFT JOIN show_seats ss ON ss.show_id = sh.id
+      WHERE sh.starts_at >= now() - INTERVAL '2 hours'
+      GROUP BY sh.id`
+  );
+
+  assert.ok(rows.length > 0, 'Must have active shows');
+  for (const r of rows) {
+    assert.equal(r.seat_count, 80, `Show ${r.id} has ${r.seat_count} seats instead of 80`);
+  }
+});

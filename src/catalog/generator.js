@@ -69,8 +69,10 @@ export function calculateUpcomingShows(nowMs, templates) {
 export async function ensureUpcomingShows() {
   const client = await pool.connect();
   try {
-    // Acquire advisory lock to serialize execution
-    await client.query('SELECT pg_advisory_lock(727002)');
+    await client.query('BEGIN');
+    // Acquire transaction-scoped advisory lock: automatically released on COMMIT or ROLLBACK.
+    // Safe with connection poolers (PgBouncer/Supavisor) and connection drops.
+    await client.query('SELECT pg_advisory_xact_lock(727002)');
 
     // Fetch the template shows (IDs 1 to 9999)
     const { rows: templates } = await client.query(
@@ -80,46 +82,66 @@ export async function ensureUpcomingShows() {
     );
 
     if (templates.length === 0) {
+      await client.query('COMMIT');
       return;
     }
 
     const generated = calculateUpcomingShows(Date.now(), templates);
+    if (generated.length === 0) {
+      await client.query('COMMIT');
+      return;
+    }
+
+    const ids = [];
+    const movieIds = [];
+    const screenIds = [];
+    const startsAts = [];
+    const priceCents = [];
+
+    let minStartsAt = generated[0].starts_at;
+    let maxStartsAt = generated[0].starts_at;
 
     for (const show of generated) {
-      // Insert new show record with screen_id & starts_at conflict checks
-      const insertRes = await client.query(
-        `INSERT INTO shows (id, movie_id, screen_id, starts_at, price_cents)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (screen_id, starts_at) DO NOTHING
-         RETURNING id`,
-        [show.id, show.movie_id, show.screen_id, show.starts_at, show.price_cents]
-      );
+      ids.push(show.id);
+      movieIds.push(show.movie_id);
+      screenIds.push(show.screen_id);
+      startsAts.push(show.starts_at);
+      priceCents.push(show.price_cents);
 
-      let finalShowId = show.id;
-      if (insertRes.rowCount === 0) {
-        const existing = await client.query(
-          `SELECT id FROM shows WHERE screen_id = $1 AND starts_at = $2`,
-          [show.screen_id, show.starts_at]
-        );
-        if (existing.rowCount > 0) {
-          finalShowId = Number(existing.rows[0].id);
-        } else {
-          continue;
-        }
-      }
-
-      // Idempotently ensure complete seat inventory for this show, even if the show was already present.
-      await client.query(
-        `INSERT INTO show_seats (show_id, seat_id)
-         SELECT $1, id 
-           FROM seats 
-          WHERE screen_id = $2
-         ON CONFLICT (show_id, seat_id) DO NOTHING`,
-        [finalShowId, show.screen_id]
-      );
+      if (show.starts_at < minStartsAt) minStartsAt = show.starts_at;
+      if (show.starts_at > maxStartsAt) maxStartsAt = show.starts_at;
     }
+
+    // 1. Bulk insert all shows in one single query
+    await client.query(
+      `INSERT INTO shows (id, movie_id, screen_id, starts_at, price_cents)
+       SELECT * FROM UNNEST(
+         $1::bigint[],
+         $2::bigint[],
+         $3::bigint[],
+         $4::timestamptz[],
+         $5::bigint[]
+       ) AS t(id, movie_id, screen_id, starts_at, price_cents)
+       ON CONFLICT (screen_id, starts_at) DO NOTHING`,
+      [ids, movieIds, screenIds, startsAts, priceCents]
+    );
+
+    // 2. Bulk ensure complete seat inventory for all shows in the active rolling window
+    await client.query(
+      `INSERT INTO show_seats (show_id, seat_id)
+       SELECT sh.id, s.id
+         FROM shows sh
+         JOIN seats s ON s.screen_id = sh.screen_id
+        WHERE sh.starts_at >= $1::timestamptz AND sh.starts_at <= $2::timestamptz
+       ON CONFLICT (show_id, seat_id) DO NOTHING`,
+      [minStartsAt, maxStartsAt]
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
   } finally {
-    await client.query('SELECT pg_advisory_unlock(727002)').catch(() => {});
     client.release();
   }
 }

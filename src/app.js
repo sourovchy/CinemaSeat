@@ -1,11 +1,45 @@
 import Fastify from 'fastify';
+import cors from '@fastify/cors';
 import { pool } from './platform/db.js';
+import { config } from './platform/config.js';
 import { catalogRoutes } from './catalog/routes.js';
 import { bookingRoutes } from './booking/routes.js';
 import { paymentRoutes } from './payment/routes.js';
 
 export function buildApp(opts = {}) {
   const app = Fastify({ logger: opts.logger ?? true });
+
+  app.register(cors, {
+    origin: (origin, cb) => {
+      // Allow requests with no origin (e.g. curl, tests, mobile/server-to-server)
+      if (!origin) return cb(null, true);
+
+      const configured = config.corsOrigin;
+      if (configured === '*') return cb(null, true);
+
+      const allowedList = configured
+        ? configured.split(',').map((s) => s.trim()).filter(Boolean)
+        : ['https://cinemaseat.vercel.app'];
+
+      if (
+        allowedList.includes(origin) ||
+        /^http:\/\/localhost(:\d+)?$/.test(origin) ||
+        /^http:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)
+      ) {
+        return cb(null, true);
+      }
+      return cb(new Error('Not allowed by CORS'), false);
+    },
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Accept',
+      'Authorization',
+      'X-Mock-Mode',
+      'X-Mock-Force',
+      'Idempotency-Key',
+    ],
+  });
 
   // JUDGING HOOK 1: static 200, no I/O, no database, no gateway. Stays green
   // and sub-second even with every other container stopped.

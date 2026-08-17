@@ -1,5 +1,6 @@
 import { pool } from '../platform/db.js';
 import { config } from '../platform/config.js';
+import { ensureUpcomingShows } from '../catalog/generator.js';
 
 // Physically releases expired holds. Correctness never depends on this —
 // every claim/read path already treats an expired hold as AVAILABLE (lazy
@@ -35,6 +36,7 @@ export async function sweepExpired() {
 
 export function startSweeper(log) {
   let running = false;
+  let lastShowGenAt = 0;
   const timer = setInterval(async () => {
     if (running) return; // never overlap sweeps
     running = true;
@@ -42,6 +44,13 @@ export function startSweeper(log) {
       const r = await sweepExpired();
       if (r.seatsReleased || r.bookingsExpired) {
         log.info(r, 'sweeper: released expired holds');
+      }
+
+      // Periodically refresh rolling show window in background (every 10 minutes)
+      const now = Date.now();
+      if (now - lastShowGenAt >= 10 * 60 * 1000) {
+        await ensureUpcomingShows();
+        lastShowGenAt = now;
       }
     } catch (err) {
       log.error({ err: err.message }, 'sweeper: sweep failed');

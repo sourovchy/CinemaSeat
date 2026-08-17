@@ -50,4 +50,7 @@ export const config = {
       process.env.PUBLIC_CALLBACK_URL ?? 'http://app:3000/api/payments/callback'
     );
   },
+  get corsOrigin() {
+    return process.env.CORS_ORIGIN;
+  },
 };

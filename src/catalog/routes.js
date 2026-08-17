@@ -1,5 +1,4 @@
 import { pool } from '../platform/db.js';
-import { ensureUpcomingShows } from './generator.js';
 
 export async function catalogRoutes(app) {
   app.get('/movies', async () => {
@@ -20,10 +19,8 @@ export async function catalogRoutes(app) {
     return { theatres: rows };
   });
 
-  // Dynamically generate upcoming shows relative to Today on access,
-  // and filter out shows that started in the past (older than 2 hours).
+  // Returns upcoming shows that started within the last 2 hours or in the future.
   app.get('/shows', async () => {
-    await ensureUpcomingShows();
     const { rows } = await pool.query(
       `SELECT sh.id, sh.movie_id, m.title AS movie_title,
               t.id AS theatre_id, t.name AS theatre_name, t.city,
